@@ -125,12 +125,15 @@ public class DyldCache: DyldCacheRepresentable, _DyldCacheFileRepresentable {
         unsafeFileHandle fileHandle: File,
         url: URL,
         cpu: CPU,
+        header: DyldCacheHeader? = nil,
         mainCache: DyldCache? = nil
     ) {
         self.fileHandle = fileHandle
         self.url = url
-        self.header = try! fileHandle.read(
-            offset: 0
+        self.header = header ?? (
+            try! fileHandle.read(
+                offset: 0
+            )
         )
         self.cpu = cpu
         self._mainCache = mainCache
@@ -247,7 +250,7 @@ extension DyldCache {
             let suffix = ".symbols"
             let path = url.path + suffix
             let symbolCache: DyldCache = try .init(
-                subcacheUrl: .init(fileURLWithPath: path),
+                subcacheUrl: .init(fileURLWithPath: path, isDirectory: false),
                 mainCacheHeader: mainCacheHeader
             )
             _symbolCache = symbolCache

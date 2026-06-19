@@ -86,10 +86,11 @@ public class MachOFile: MachORepresentable {
         try self.init(
             url: url,
             imagePath: imagePath,
+            fileHandle: cache.fileHandle,
             headerStartOffset: 0,
-            headerStartOffsetInCache: headerStartOffsetInCache
+            headerStartOffsetInCache: headerStartOffsetInCache,
+            cache: cache
         )
-        self._cache = cache
     }
 
     @available(*, deprecated, renamed: "init(url:imagePath:headerStartOffsetInCache:cache:)")
@@ -106,19 +107,37 @@ public class MachOFile: MachORepresentable {
         )
     }
 
-    package init(
+    package convenience init(
         url: URL,
         imagePath: String?,
         headerStartOffset: Int,
         headerStartOffsetInCache: Int
     ) throws {
-        self.url = url
-        self._imagePath = imagePath
         let fileHandle = try File.open(
             url: url,
             isWritable: false
         )
+        try self.init(
+            url: url,
+            imagePath: imagePath,
+            fileHandle: fileHandle,
+            headerStartOffset: headerStartOffset,
+            headerStartOffsetInCache: headerStartOffsetInCache
+        )
+    }
+
+    private init(
+        url: URL,
+        imagePath: String?,
+        fileHandle: File,
+        headerStartOffset: Int,
+        headerStartOffsetInCache: Int,
+        cache: DyldCache? = nil
+    ) throws {
+        self.url = url
+        self._imagePath = imagePath
         self.fileHandle = fileHandle
+        self._cache = cache
 
         self.headerStartOffset = headerStartOffset
         self.headerStartOffsetInCache = headerStartOffsetInCache
@@ -197,7 +216,7 @@ extension MachOFile {
                     flags = dylibUseCmd.flags
                 }
                 let lib = cmd.dylib(in: self)
-                dependencies.append(.init(dylib: lib, type: .load, useFlags: flags))
+                dependencies.append(.init(dylib: lib, type: .weakLoad, useFlags: flags))
             case let .reexportDylib(cmd):
                 let lib = cmd.dylib(in: self)
                 dependencies.append(.init(dylib: lib, type: .reexport))
