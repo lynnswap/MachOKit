@@ -87,7 +87,23 @@ extension MachOFile {
         }
         let offset = UInt64(info.layout.dataoff)
         let byteCount = UInt64(info.layout.datasize)
-        guard byteCount > 0,
+        guard let linkeditRange = chainedFixupsLinkeditRange(),
+              offset >= linkeditRange.offset,
+              byteCount > 0 else {
+            return .failed(
+                .init(
+                    location: .payload,
+                    reason: .invalidRange(
+                        offset: offset,
+                        byteCount: byteCount,
+                        availableByteCount: 0
+                    )
+                )
+            )
+        }
+        let relativeOffset = offset - linkeditRange.offset
+        guard relativeOffset <= linkeditRange.size,
+              byteCount <= linkeditRange.size - relativeOffset,
               let intOffset = Int(exactly: offset),
               let intByteCount = Int(exactly: byteCount),
               let fileSlice = _fileSliceForLinkEditData(
@@ -100,7 +116,7 @@ extension MachOFile {
                     reason: .invalidRange(
                         offset: offset,
                         byteCount: byteCount,
-                        availableByteCount: fileHandle.size
+                        availableByteCount: Int(exactly: linkeditRange.size) ?? 0
                     )
                 )
             )
@@ -108,6 +124,19 @@ extension MachOFile {
         return .available(
             .init(fileSlice: fileSlice, isSwapped: isSwapped)
         )
+    }
+
+    private func chainedFixupsLinkeditRange() -> (offset: UInt64, size: UInt64)? {
+        if let linkedit = loadCommands.linkedit64 {
+            return (linkedit.layout.fileoff, linkedit.layout.filesize)
+        }
+        if let linkedit = loadCommands.linkedit {
+            return (
+                UInt64(linkedit.layout.fileoff),
+                UInt64(linkedit.layout.filesize)
+            )
+        }
+        return nil
     }
 }
 
@@ -574,17 +603,68 @@ extension MachOFile.DyldChainedFixups {
 
     private func validateSegmentCount(in machO: MachOFile) throws {
         let starts = try parser.startsInImage()
-        let segmentCount = machOSegmentCount(in: machO)
-        guard let fixupSegmentCount = Int(exactly: starts.layout.seg_count),
-              fixupSegmentCount <= segmentCount else {
-            throw DyldChainedFixupsReadError(
-                location: .segmentOffsets,
-                reason: .invalidValue(
-                    field: "seg_count",
-                    value: UInt64(starts.layout.seg_count)
-                )
+        guard let fixupSegmentCount = Int(exactly: starts.layout.seg_count) else {
+            throw invalidSegmentCount(starts.layout.seg_count)
+        }
+        if machO.is64Bit {
+            let segments = Array(machO.segments64)
+            guard let linkeditIndex = segments.firstIndex(
+                where: { $0.segmentName == "__LINKEDIT" }
+            ) else {
+                throw invalidSegmentCount(starts.layout.seg_count)
+            }
+            try validateSegmentCount(
+                fixupSegmentCount,
+                linkeditIndex: linkeditIndex,
+                virtualMemorySizes: segments.map(\.layout.vmsize),
+                encodedValue: starts.layout.seg_count
+            )
+        } else {
+            let segments = Array(machO.segments32)
+            guard let linkeditIndex = segments.firstIndex(
+                where: { $0.segmentName == "__LINKEDIT" }
+            ) else {
+                throw invalidSegmentCount(starts.layout.seg_count)
+            }
+            try validateSegmentCount(
+                fixupSegmentCount,
+                linkeditIndex: linkeditIndex,
+                virtualMemorySizes: segments.map { UInt64($0.layout.vmsize) },
+                encodedValue: starts.layout.seg_count
             )
         }
+    }
+
+    private func validateSegmentCount(
+        _ fixupSegmentCount: Int,
+        linkeditIndex: Int,
+        virtualMemorySizes: [UInt64],
+        encodedValue: UInt32
+    ) throws {
+        let expectedSegmentCount = linkeditIndex + 1
+        guard fixupSegmentCount <= expectedSegmentCount else {
+            throw invalidSegmentCount(encodedValue)
+        }
+        let extraSegmentCount = expectedSegmentCount - fixupSegmentCount
+        for extraIndex in 0 ..< extraSegmentCount {
+            let segmentIndex = linkeditIndex - (extraIndex + 1)
+            guard virtualMemorySizes.indices.contains(segmentIndex),
+                  virtualMemorySizes[segmentIndex] == 0 else {
+                throw invalidSegmentCount(encodedValue)
+            }
+        }
+    }
+
+    private func invalidSegmentCount(
+        _ encodedValue: UInt32
+    ) -> DyldChainedFixupsReadError {
+        .init(
+            location: .segmentOffsets,
+            reason: .invalidValue(
+                field: "seg_count",
+                value: UInt64(encodedValue)
+            )
+        )
     }
 
     private func machOSegmentCount(in machO: MachOFile) -> Int {
