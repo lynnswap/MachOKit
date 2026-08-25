@@ -50,13 +50,15 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
     }
 
     func testTruncatedSegmentOffsetTableIsBounded() throws {
-        let blob = Data(
+        var blob = Data(
             makeFixupsBlob(
                 segmentOffsets: [0, 0x10, 0],
                 segmentRelativeOffset: 0x10,
                 entries: [0]
             ).prefix(0x28)
         )
+        blob.write(UInt32(0x28), at: 0x08)
+        blob.write(UInt32(0x28), at: 0x0C)
 
         try withParser(for: blob) { parser in
             let report = parser.segments()
@@ -67,8 +69,8 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
 
     func testTruncatedPagePrefixIsBounded() throws {
         let blob = makeFixupsBlob(
-            segmentOffsets: [0, 0x0C],
-            segmentRelativeOffset: 0x0C,
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
             declaredSize: 24,
             pageCount: 2,
             entries: [0]
@@ -83,8 +85,8 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
 
     func testTruncatedImportsAreAllOrNothing() throws {
         var blob = makeFixupsBlob(
-            segmentOffsets: [0, 0x0C],
-            segmentRelativeOffset: 0x0C,
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
             entries: [0]
         )
         let importsOffset = blob.count
@@ -106,8 +108,8 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
 
     func testSymbolNameRequiresTerminatorInsideFixupsBlob() throws {
         var blob = makeFixupsBlob(
-            segmentOffsets: [0, 0x0C],
-            segmentRelativeOffset: 0x0C,
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
             entries: [0]
         )
         let importsOffset = blob.count
@@ -126,12 +128,12 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
 
     func testValidMultiStartUsesTrailingFlexibleEntries() throws {
         let blob = makeFixupsBlob(
-            segmentOffsets: [0, 0x0C],
-            segmentRelativeOffset: 0x0C,
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
             pointerFormat: UInt16(DYLD_CHAINED_PTR_32),
             entries: [0x8001, 0x0004, 0x8008]
         )
-        var machOData = makeMachO(fixupsBlob: blob)
+        var machOData = makeMachO32(fixupsBlob: blob)
         machOData.write(UInt32(0), at: 0x1004)
         machOData.write(UInt32(0), at: 0x1008)
 
@@ -146,13 +148,13 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
 
     func testMultiStartIndexOutsideFlexibleEntriesFailsNormally() throws {
         let blob = makeFixupsBlob(
-            segmentOffsets: [0, 0x0C],
-            segmentRelativeOffset: 0x0C,
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
             pointerFormat: UInt16(DYLD_CHAINED_PTR_32),
             entries: [0x8003, 0x0004, 0x8008]
         )
 
-        try withMachOFile(data: makeMachO(fixupsBlob: blob)) { machO in
+        try withMachOFile(data: makeMachO32(fixupsBlob: blob)) { machO in
             let fixups = try XCTUnwrap(machO.dyldChainedFixups)
             let report = fixups.pointerReport(in: machO)
             XCTAssertTrue(report.pointers.isEmpty)
@@ -163,13 +165,13 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
 
     func testMultiStartWithoutLastEntryFailsNormally() throws {
         let blob = makeFixupsBlob(
-            segmentOffsets: [0, 0x0C],
-            segmentRelativeOffset: 0x0C,
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
             pointerFormat: UInt16(DYLD_CHAINED_PTR_32),
             entries: [0x8001, 0x0004, 0x0008]
         )
 
-        try withMachOFile(data: makeMachO(fixupsBlob: blob)) { machO in
+        try withMachOFile(data: makeMachO32(fixupsBlob: blob)) { machO in
             let fixups = try XCTUnwrap(machO.dyldChainedFixups)
             let report = fixups.pointerReport(in: machO)
             XCTAssertTrue(report.pointers.isEmpty)
@@ -182,8 +184,8 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
 
     func testMultiStartIsRejectedFor64BitPointerFormat() throws {
         let blob = makeFixupsBlob(
-            segmentOffsets: [0, 0x0C],
-            segmentRelativeOffset: 0x0C,
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
             entries: [0x8001, 0x0004, 0x8008]
         )
 
@@ -192,6 +194,61 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
             let report = fixups.pointerReport(in: machO)
             XCTAssertTrue(report.pointers.isEmpty)
             XCTAssertEqual(report.failures.first?.location, .multiStart(segment: 1, page: 0))
+        }
+    }
+
+    func testMultiStartsMustBeStrictlyAscending() throws {
+        for entries: [UInt16] in [
+            [0x8001, 0x0008, 0x8004],
+            [0x8001, 0x0004, 0x8004],
+        ] {
+            let blob = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+                pointerFormat: UInt16(DYLD_CHAINED_PTR_32),
+                entries: entries
+            )
+            try withMachOFile(data: makeMachO32(fixupsBlob: blob)) { machO in
+                let fixups = try XCTUnwrap(machO.dyldChainedFixups)
+                let failure = try XCTUnwrap(fixups.pointerReport(in: machO).failures.first)
+                XCTAssertEqual(failure.location, .multiStart(segment: 1, page: 0))
+                guard case let .invalidValue(field, _) = failure.reason else {
+                    return XCTFail("Expected invalid multi-start ordering")
+                }
+                XCTAssertEqual(field, "multiStartOrder")
+            }
+        }
+    }
+
+    func testMultiStartsValidateEveryPointerWidthBeforeWalking() throws {
+        let blob = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            pointerFormat: UInt16(DYLD_CHAINED_PTR_32),
+            entries: [0x8001, 0x0004, 0x8FFF]
+        )
+
+        try withMachOFile(data: makeMachO32(fixupsBlob: blob)) { machO in
+            let fixups = try XCTUnwrap(machO.dyldChainedFixups)
+            let report = fixups.pointerReport(in: machO)
+            XCTAssertTrue(report.pointers.isEmpty)
+            XCTAssertEqual(report.failures.first?.location, .multiStart(segment: 1, page: 0))
+        }
+    }
+
+    func testPointerFormatBitnessMustMatchMachO() throws {
+        let blob = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            pointerFormat: UInt16(DYLD_CHAINED_PTR_32),
+            entries: [0]
+        )
+
+        try withMachOFile(data: makeMachO(fixupsBlob: blob)) { machO in
+            let fixups = try XCTUnwrap(machO.dyldChainedFixups)
+            let failure = try XCTUnwrap(fixups.pointerReport(in: machO).failures.first)
+            XCTAssertEqual(failure.location, .segment(index: 1))
+            XCTAssertThrowsError(try machO.validateChainedFixups())
         }
     }
 
@@ -221,8 +278,8 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
 
     func testPointerWidthCannotCrossSegmentEnd() throws {
         let blob = makeFixupsBlob(
-            segmentOffsets: [0, 0x0C],
-            segmentRelativeOffset: 0x0C,
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
             entries: [0x0FFC]
         )
 
@@ -236,8 +293,8 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
 
     func testChainCannotContinueIntoTheNextPage() throws {
         let blob = makeFixupsBlob(
-            segmentOffsets: [0, 0x0C],
-            segmentRelativeOffset: 0x0C,
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
             entries: [0x0FF8]
         )
         var machOData = makeMachO(fixupsBlob: blob)
@@ -253,8 +310,8 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
 
     func testSegmentFileSliceOutOfRangeFailsWithoutTrap() throws {
         let blob = makeFixupsBlob(
-            segmentOffsets: [0, 0x0C],
-            segmentRelativeOffset: 0x0C,
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
             entries: [0]
         )
         let machOData = makeMachO(
@@ -266,6 +323,183 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
             let fixups = try XCTUnwrap(machO.dyldChainedFixups)
             XCTAssertTrue(fixups.pointerReport(in: machO).pointers.isEmpty)
             XCTAssertThrowsError(try machO.validateChainedFixups())
+        }
+    }
+
+    func testAbsentAndUnreadableChainedFixupPayloadsRemainDistinct() throws {
+        var absentData = makeMachO(
+            fixupsBlob: makeFixupsBlob(
+                segmentOffsets: [0, 0x10, 0],
+                segmentRelativeOffset: 0x10,
+                entries: [0]
+            )
+        )
+        absentData.write(UInt32(3), at: 16)
+        absentData.write(UInt32(72 * 3), at: 20)
+        try withMachOFile(data: absentData) { machO in
+            XCTAssertNil(machO.dyldChainedFixups)
+            XCTAssertNoThrow(try machO.validateChainedFixups())
+        }
+
+        let readableData = makeMachO(
+            fixupsBlob: makeFixupsBlob(
+                segmentOffsets: [0, 0x10, 0],
+                segmentRelativeOffset: 0x10,
+                entries: [0]
+            )
+        )
+        let mutations: [(inout Data) -> Void] = [
+            { $0.write(UInt32(0x4000), at: 32 + 72 * 3 + 8) },
+            { $0.write(UInt32(0), at: 32 + 72 * 3 + 12) },
+        ]
+        for mutate in mutations {
+            var unreadableData = readableData
+            mutate(&unreadableData)
+            try withMachOFile(data: unreadableData) { machO in
+                XCTAssertNil(machO.dyldChainedFixups)
+                XCTAssertThrowsError(try machO.validateChainedFixups()) { error in
+                    XCTAssertEqual((error as? DyldChainedFixupsReadError)?.location, .payload)
+                }
+            }
+        }
+    }
+
+    func testValidatedHeaderRejectsInvalidTopLevelContracts() throws {
+        let validBlob = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            entries: [0]
+        )
+        let mutations: [(inout Data) -> Void] = [
+            { $0.write(UInt32(1), at: 0x00) },
+            {
+                $0.write(UInt32(0), at: 0x08)
+                $0.write(UInt32(1), at: 0x10)
+            },
+            { $0.write(UInt32(99), at: 0x14) },
+            { $0.write(UInt32(1), at: 0x18) },
+        ]
+
+        for mutate in mutations {
+            var blob = validBlob
+            mutate(&blob)
+            try withMachOFile(data: makeMachO(fixupsBlob: blob)) { machO in
+                XCTAssertNotNil(machO.dyldChainedFixups?.header)
+                XCTAssertThrowsError(try machO.validateChainedFixups()) { error in
+                    XCTAssertEqual((error as? DyldChainedFixupsReadError)?.location, .header)
+                }
+            }
+        }
+    }
+
+    func testUnsupportedSymbolCompressionDoesNotHideStructuralStarts() throws {
+        var blob = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            entries: [0]
+        )
+        blob.write(UInt32(1), at: 0x18)
+
+        try withMachOFile(data: makeMachO(fixupsBlob: blob)) { machO in
+            let fixups = try XCTUnwrap(machO.dyldChainedFixups)
+            let starts = try XCTUnwrap(fixups.startsInImage)
+            XCTAssertEqual(fixups.startsInSegments(of: starts).map(\.segmentIndex), [1])
+            XCTAssertEqual(fixups.pointerReport(in: machO).pointers.map(\.offset), [0x1000])
+            XCTAssertNil(fixups.symbolName(for: 0))
+            XCTAssertThrowsError(try machO.validateChainedFixups())
+        }
+
+        var unknownImportsFormat = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            entries: [0]
+        )
+        unknownImportsFormat.write(UInt32(99), at: 0x14)
+        try withParser(for: unknownImportsFormat) { parser in
+            XCTAssertNoThrow(try parser.startsInImage())
+            XCTAssertThrowsError(try parser.imports())
+        }
+    }
+
+    func testSegmentCountAndPageSizeMustMatchMachOContracts() throws {
+        var wrongSegmentCount = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            entries: [0]
+        )
+        wrongSegmentCount.write(UInt32(2), at: 0x20)
+        try withMachOFile(data: makeMachO(fixupsBlob: wrongSegmentCount)) { machO in
+            XCTAssertThrowsError(try machO.validateChainedFixups())
+        }
+
+        let wrongPageSize = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            pageSize: 0x2000,
+            entries: [0]
+        )
+        try withMachOFile(data: makeMachO(fixupsBlob: wrongPageSize)) { machO in
+            XCTAssertThrowsError(try machO.validateChainedFixups())
+        }
+    }
+
+    func testBindOrdinalMustExistInValidatedImports() throws {
+        var blob = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            entries: [0]
+        )
+        let importsOffset = blob.count
+        blob.append(Data(count: 4))
+        let symbolsOffset = blob.count
+        blob.append(0)
+        blob.write(UInt32(importsOffset), at: 0x08)
+        blob.write(UInt32(symbolsOffset), at: 0x0C)
+        blob.write(UInt32(1), at: 0x10)
+
+        var machOData = makeMachO(fixupsBlob: blob)
+        machOData.write(UInt64(0x8000_0000_0000_0001), at: 0x1000)
+        try withMachOFile(data: machOData) { machO in
+            XCTAssertNil(machO.resolveBind(at: 0x1000))
+            XCTAssertThrowsError(try machO.validateChainedFixups()) { error in
+                XCTAssertEqual((error as? DyldChainedFixupsReadError)?.location, .imports)
+            }
+        }
+    }
+
+    func testPointerIndexRejectsDuplicateFileOffsetsAtInsertionOwner() {
+        let pointer = DyldChainedFixupPointer(
+            offset: 0x1000,
+            fixupInfo: ._64_offset(.init(rawValue: 0))
+        )
+        var index = DyldChainedFixupPointerIndex(
+            pointersByFileOffset: [:],
+            orderedPointers: [],
+            failures: []
+        )
+        index.insert(pointer)
+        index.insert(pointer)
+
+        XCTAssertEqual(index.pointersByFileOffset.count, 1)
+        XCTAssertEqual(index.orderedPointers.count, 1)
+        XCTAssertEqual(index.failures.first?.location, .resolver)
+    }
+
+    func testFatSliceHeaderOffsetIsExcludedFromPointerCoordinate() throws {
+        let blob = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            entries: [0]
+        )
+        let prefixSize = 0x200
+        var fatLikeData = Data(count: prefixSize)
+        fatLikeData.append(makeMachO(fixupsBlob: blob))
+
+        try withMachOFile(data: fatLikeData, headerStartOffset: prefixSize) { machO in
+            try machO.validateChainedFixups()
+            let fixups = try XCTUnwrap(machO.dyldChainedFixups)
+            XCTAssertEqual(fixups.pointer(for: 0x1000, in: machO)?.offset, 0x1000)
+            XCTAssertEqual(machO.resolveRebase(at: 0x1000), 0)
         }
     }
 }
@@ -287,13 +521,14 @@ private extension DyldChainedFixupsSafetyTests {
 
     func withMachOFile(
         data: Data,
+        headerStartOffset: Int = 0,
         _ body: (MachOFile) throws -> Void
     ) throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("MachOKit-ChainedFixups-\(UUID().uuidString)")
         try data.write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
-        try body(MachOFile(url: url))
+        try body(MachOFile(url: url, headerStartOffset: headerStartOffset))
     }
 
     func makeFixupsBlob(
@@ -399,6 +634,64 @@ private extension DyldChainedFixupsSafetyTests {
         return data
     }
 
+    func makeMachO32(
+        fixupsBlob: Data,
+        dataSegmentFileOffset: UInt32 = 0x1000,
+        dataSegmentFileSize: UInt32 = 0x1000,
+        dataSegmentVMOffset: UInt32 = 0x4000
+    ) -> Data {
+        let preferredLoadAddress: UInt32 = 0x1000_0000
+        let linkeditFileOffset: UInt32 = 0x2000
+        var data = Data(count: 0x3000)
+
+        data.write(UInt32(MH_MAGIC), at: 0)
+        data.write(UInt32(bitPattern: CPU_TYPE_I386), at: 4)
+        data.write(UInt32(0), at: 8)
+        data.write(UInt32(MH_DYLIB), at: 12)
+        data.write(UInt32(4), at: 16)
+        data.write(UInt32(56 * 3 + 16), at: 20)
+        data.write(UInt32(0), at: 24)
+
+        writeSegment32(
+            name: "__TEXT",
+            vmAddress: preferredLoadAddress,
+            vmSize: 0x1000,
+            fileOffset: 0,
+            fileSize: 0x1000,
+            at: 28,
+            in: &data
+        )
+        writeSegment32(
+            name: "__DATA",
+            vmAddress: preferredLoadAddress + dataSegmentVMOffset,
+            vmSize: 0x1000,
+            fileOffset: dataSegmentFileOffset,
+            fileSize: dataSegmentFileSize,
+            at: 28 + 56,
+            in: &data
+        )
+        writeSegment32(
+            name: "__LINKEDIT",
+            vmAddress: preferredLoadAddress + 0x8000,
+            vmSize: 0x1000,
+            fileOffset: linkeditFileOffset,
+            fileSize: 0x1000,
+            at: 28 + 56 * 2,
+            in: &data
+        )
+
+        let fixupsCommandOffset = 28 + 56 * 3
+        data.write(UInt32(LC_DYLD_CHAINED_FIXUPS), at: fixupsCommandOffset)
+        data.write(UInt32(16), at: fixupsCommandOffset + 4)
+        data.write(linkeditFileOffset, at: fixupsCommandOffset + 8)
+        data.write(UInt32(fixupsBlob.count), at: fixupsCommandOffset + 12)
+        data.replaceSubrange(
+            Int(linkeditFileOffset) ..< Int(linkeditFileOffset) + fixupsBlob.count,
+            with: fixupsBlob
+        )
+        return data
+    }
+
     func writeSegment64(
         name: String,
         vmAddress: UInt64,
@@ -420,6 +713,29 @@ private extension DyldChainedFixupsSafetyTests {
         data.write(UInt32(bitPattern: VM_PROT_READ | VM_PROT_WRITE), at: offset + 60)
         data.write(UInt32(0), at: offset + 64)
         data.write(UInt32(0), at: offset + 68)
+    }
+
+    func writeSegment32(
+        name: String,
+        vmAddress: UInt32,
+        vmSize: UInt32,
+        fileOffset: UInt32,
+        fileSize: UInt32,
+        at offset: Int,
+        in data: inout Data
+    ) {
+        data.write(UInt32(LC_SEGMENT), at: offset)
+        data.write(UInt32(56), at: offset + 4)
+        let nameBytes = Array(name.utf8.prefix(16))
+        data.replaceSubrange(offset + 8 ..< offset + 8 + nameBytes.count, with: nameBytes)
+        data.write(vmAddress, at: offset + 24)
+        data.write(vmSize, at: offset + 28)
+        data.write(fileOffset, at: offset + 32)
+        data.write(fileSize, at: offset + 36)
+        data.write(UInt32(bitPattern: VM_PROT_READ | VM_PROT_WRITE), at: offset + 40)
+        data.write(UInt32(bitPattern: VM_PROT_READ | VM_PROT_WRITE), at: offset + 44)
+        data.write(UInt32(0), at: offset + 48)
+        data.write(UInt32(0), at: offset + 52)
     }
 }
 

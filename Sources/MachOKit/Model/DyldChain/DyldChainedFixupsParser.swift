@@ -8,6 +8,7 @@ import Foundation
 @_spi(Support)
 public struct DyldChainedFixupsReadError: Error, Sendable, Equatable, LocalizedError {
     public enum Location: Sendable, Equatable {
+        case payload
         case header
         case startsInImage
         case segmentOffsets
@@ -38,7 +39,7 @@ public struct DyldChainedFixupsReadError: Error, Sendable, Equatable, LocalizedE
     }
 
     public var errorDescription: String? {
-        "Malformed chained fixups at \(location): \(reason)"
+        "Unable to read chained fixups at \(location): \(reason)"
     }
 }
 
@@ -188,8 +189,55 @@ internal struct DyldChainedFixupsParser {
         return isSwapped ? header.swapped : header
     }
 
-    func startsInImage() throws -> DyldChainedStartsInImage {
+    func structurallyValidatedHeader() throws -> DyldChainedFixupsHeader {
         let header = try header()
+        guard header.layout.fixups_version == 0 else {
+            throw DyldChainedFixupsReadError(
+                location: .header,
+                reason: .invalidValue(
+                    field: "fixups_version",
+                    value: UInt64(header.layout.fixups_version)
+                )
+            )
+        }
+
+        let startsOffset = UInt64(header.layout.starts_offset)
+        let importsOffset = UInt64(header.layout.imports_offset)
+        let symbolsOffset = UInt64(header.layout.symbols_offset)
+        let blobSize = UInt64(view.bytes.count)
+        guard startsOffset >= UInt64(MemoryLayout<DyldChainedFixupsHeader.Layout>.size),
+              startsOffset < importsOffset,
+              importsOffset <= symbolsOffset,
+              symbolsOffset <= blobSize else {
+            throw DyldChainedFixupsReadError(
+                location: .header,
+                reason: .invalidValue(
+                    field: "starts/imports/symbols offsets",
+                    value: startsOffset
+                )
+            )
+        }
+        return header
+    }
+
+    func validateFormatCapabilities() throws {
+        let header = try structurallyValidatedHeader()
+        guard header.importsFormat != nil else {
+            throw DyldChainedFixupsReadError(
+                location: .header,
+                reason: .unsupportedFormat(value: UInt64(header.layout.imports_format))
+            )
+        }
+        guard header.symbolsFormat == .uncompressed else {
+            throw DyldChainedFixupsReadError(
+                location: .header,
+                reason: .unsupportedFormat(value: UInt64(header.layout.symbols_format))
+            )
+        }
+    }
+
+    func startsInImage() throws -> DyldChainedStartsInImage {
+        let header = try structurallyValidatedHeader()
         let offset = UInt64(header.layout.starts_offset)
         let layout: DyldChainedStartsInImage.Layout = try view.loadUnaligned(
             at: offset,
@@ -229,7 +277,7 @@ internal struct DyldChainedFixupsParser {
                 tableByteCount,
                 location: .segmentOffsets
             )
-            let importsOffset = UInt64(try header().layout.imports_offset)
+            let importsOffset = UInt64(try structurallyValidatedHeader().layout.imports_offset)
             guard importsOffset == 0 || tableEnd <= importsOffset else {
                 throw DyldChainedFixupsReadError(
                     location: .segmentOffsets,
@@ -320,15 +368,15 @@ internal struct DyldChainedFixupsParser {
     }
 
     func imports() throws -> [DyldChainedImport] {
-        let header = try header()
-        let count = UInt64(header.layout.imports_count)
-        guard count > 0 else { return [] }
+        let header = try structurallyValidatedHeader()
         guard let format = header.importsFormat else {
             throw DyldChainedFixupsReadError(
-                location: .imports,
+                location: .header,
                 reason: .unsupportedFormat(value: UInt64(header.layout.imports_format))
             )
         }
+        let count = UInt64(header.layout.imports_count)
+        guard count > 0 else { return [] }
         let offset = UInt64(header.layout.imports_offset)
 
         switch format {
@@ -366,7 +414,7 @@ internal struct DyldChainedFixupsParser {
     }
 
     func symbolName(for nameOffset: Int) throws -> String {
-        let header = try header()
+        let header = try structurallyValidatedHeader()
         guard header.symbolsFormat == .uncompressed else {
             throw DyldChainedFixupsReadError(
                 location: .symbolName,
@@ -499,7 +547,7 @@ internal struct DyldChainedFixupsParser {
             declaredSize,
             location: location
         )
-        let importsOffset = UInt64(try header().layout.imports_offset)
+        let importsOffset = UInt64(try structurallyValidatedHeader().layout.imports_offset)
         guard importsOffset == 0 || segmentEnd <= importsOffset else {
             throw DyldChainedFixupsReadError(
                 location: location,

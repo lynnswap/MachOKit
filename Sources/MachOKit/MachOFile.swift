@@ -31,7 +31,7 @@ public class MachOFile: MachORepresentable {
     private var _cache: DyldCache?
 
     // Cache for chained fixups lookup
-    private var _chainedFixupsCache: DyldChainedFixups?
+    private var _chainedFixupsSourceState: MachOFileChainedFixupsSourceState?
     private var _fixupPointersCache: DyldChainedFixupPointerIndex?
     private var _chainedImportsCache: [DyldChainedImport]?
 
@@ -531,18 +531,10 @@ extension MachOFile {
 
 extension MachOFile {
     public var dyldChainedFixups: DyldChainedFixups? {
-        guard let info = loadCommands.dyldChainedFixups else {
-            return nil
+        switch chainedFixupsSourceState {
+        case let .available(fixups): fixups
+        case .absent, .failed: nil
         }
-        guard let fileSlice = _fileSliceForLinkEditData(
-            offset: numericCast(info.dataoff),
-            length: numericCast(info.datasize)
-        ) else { return nil }
-
-        return .init(
-            fileSlice: fileSlice,
-            isSwapped: isSwapped
-        )
     }
 }
 
@@ -823,16 +815,11 @@ extension MachOFile {
 extension MachOFile {
     // MARK: - Chained Fixups Cache
 
-    /// Cached `DyldChainedFixups` instance for this Mach-O file.
-    ///
-    /// This property lazily caches the chained fixups data to avoid
-    /// repeatedly reading from the file and creating new instances.
-    private var cachedChainedFixups: DyldChainedFixups? {
-        if let cached = _chainedFixupsCache {
-            return cached
-        }
-        _chainedFixupsCache = dyldChainedFixups
-        return _chainedFixupsCache
+    private var chainedFixupsSourceState: MachOFileChainedFixupsSourceState {
+        if let state = _chainedFixupsSourceState { return state }
+        let state = loadChainedFixupsSourceState()
+        _chainedFixupsSourceState = state
+        return state
     }
 
     /// Cached mapping from offset to `DyldChainedFixupPointer`.
@@ -844,40 +831,28 @@ extension MachOFile {
             return cache
         }
 
-        guard let chainedFixup = cachedChainedFixups else {
+        switch chainedFixupsSourceState {
+        case .absent:
             let cache = DyldChainedFixupPointerIndex(
                 pointersByFileOffset: [:],
+                orderedPointers: [],
                 failures: []
             )
             _fixupPointersCache = cache
             return cache
+        case let .failed(error):
+            let cache = DyldChainedFixupPointerIndex(
+                pointersByFileOffset: [:],
+                orderedPointers: [],
+                failures: [error]
+            )
+            _fixupPointersCache = cache
+            return cache
+        case let .available(chainedFixup):
+            let cache = chainedFixup.pointerIndex(in: self)
+            _fixupPointersCache = cache
+            return cache
         }
-
-        let report = chainedFixup.pointerReport(in: self)
-        var pointersByFileOffset: [Int: DyldChainedFixupPointer] = [:]
-        var failures = report.failures
-        for pointer in report.pointers {
-            if pointersByFileOffset[pointer.offset] != nil {
-                failures.append(
-                    .init(
-                        location: .resolver,
-                        reason: .invalidValue(
-                            field: "duplicatePointerOffset",
-                            value: UInt64(exactly: pointer.offset) ?? 0
-                        )
-                    )
-                )
-            } else {
-                pointersByFileOffset[pointer.offset] = pointer
-            }
-        }
-
-        let cache = DyldChainedFixupPointerIndex(
-            pointersByFileOffset: pointersByFileOffset,
-            failures: failures
-        )
-        _fixupPointersCache = cache
-        return cache
     }
 
     /// Cached imports array from chained fixups.
@@ -885,7 +860,11 @@ extension MachOFile {
         if let cache = _chainedImportsCache {
             return cache
         }
-        let imports = cachedChainedFixups?.imports ?? []
+        let imports: [DyldChainedImport]
+        switch chainedFixupsSourceState {
+        case let .available(fixups): imports = fixups.imports
+        case .absent, .failed: imports = []
+        }
         _chainedImportsCache = imports
         return imports
     }
@@ -895,7 +874,7 @@ extension MachOFile {
     /// Call this method if the underlying file data has changed
     /// and the caches need to be rebuilt.
     public func invalidateChainedFixupsCache() {
-        _chainedFixupsCache = nil
+        _chainedFixupsSourceState = nil
         _fixupPointersCache = nil
         _chainedImportsCache = nil
     }
@@ -908,9 +887,37 @@ extension MachOFile {
     ///   pointer representation.
     @_spi(Support)
     public func validateChainedFixups() throws {
-        guard let chainedFixup = cachedChainedFixups else { return }
-        if let failure = chainedFixup.validationFailures(in: self).first {
+        let chainedFixup: DyldChainedFixups
+        switch chainedFixupsSourceState {
+        case .absent:
+            return
+        case let .failed(error):
+            throw error
+        case let .available(fixups):
+            chainedFixup = fixups
+        }
+
+        try chainedFixup.parser.validateFormatCapabilities()
+        let index = fixupPointersCache
+        if let failure = index.failures.first {
             throw failure
+        }
+        let imports = try chainedFixup.parser.imports()
+        for pointer in index.orderedPointers {
+            guard pointer.fixupInfo.bind != nil else { continue }
+            guard let (ordinal, _) = pointer.bindOrdinalAndAddend(for: self),
+                  imports.indices.contains(ordinal) else {
+                throw DyldChainedFixupsReadError(
+                    location: .imports,
+                    reason: .invalidIndex(
+                        index: pointer.fixupInfo.bind?.ordinal ?? -1,
+                        count: imports.count
+                    )
+                )
+            }
+        }
+        for `import` in imports {
+            _ = try chainedFixup.parser.symbolName(for: `import`.info.nameOffset)
         }
     }
 }
