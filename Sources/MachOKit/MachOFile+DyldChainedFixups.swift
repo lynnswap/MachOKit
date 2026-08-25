@@ -212,6 +212,12 @@ extension MachOFile.DyldChainedFixups {
             orderedPointers: [],
             failures: segmentReport.failures
         )
+        if let failure = pointerFormatConsistencyFailure(
+            in: segmentReport.value
+        ) {
+            index.failures.append(failure)
+            return index
+        }
         do {
             try validateSegmentCount(in: machO)
         } catch let error as DyldChainedFixupsReadError {
@@ -231,6 +237,26 @@ extension MachOFile.DyldChainedFixups {
             }
         }
         return index
+    }
+
+    private func pointerFormatConsistencyFailure(
+        in segments: [ParsedDyldChainedFixupsSegment]
+    ) -> DyldChainedFixupsReadError? {
+        guard let first = segments.first else { return nil }
+        let expectedFormat = first.info.layout.pointer_format
+        for segment in segments.dropFirst() {
+            guard segment.info.layout.pointer_format != expectedFormat else {
+                continue
+            }
+            return .init(
+                location: .segment(index: segment.info.segmentIndex),
+                reason: .invalidValue(
+                    field: "pointer_format consistency",
+                    value: UInt64(segment.info.layout.pointer_format)
+                )
+            )
+        }
+        return nil
     }
 
     private func pointerReport(

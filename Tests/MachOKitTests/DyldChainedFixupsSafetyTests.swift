@@ -252,6 +252,37 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
         }
     }
 
+    func testAllChainedFixupSegmentsMustSharePointerFormat() throws {
+        let format = UInt16(DYLD_CHAINED_PTR_64_OFFSET)
+        let sameFormat = makeTwoSegmentFixupsBlob(
+            secondPointerFormat: format
+        )
+        try withMachOFile(data: makeMachO(fixupsBlob: sameFormat)) { machO in
+            try machO.validateChainedFixups()
+            let fixups = try XCTUnwrap(machO.dyldChainedFixups)
+            XCTAssertEqual(
+                fixups.pointerReport(in: machO).pointers.map(\.offset),
+                [0x1000, 0x2100]
+            )
+        }
+
+        let mixedFormat = makeTwoSegmentFixupsBlob(
+            secondPointerFormat: UInt16(DYLD_CHAINED_PTR_64)
+        )
+        try withMachOFile(data: makeMachO(fixupsBlob: mixedFormat)) { machO in
+            let fixups = try XCTUnwrap(machO.dyldChainedFixups)
+            let report = fixups.pointerReport(in: machO)
+            XCTAssertTrue(report.pointers.isEmpty)
+            let failure = try XCTUnwrap(report.failures.first)
+            XCTAssertEqual(failure.location, .segment(index: 2))
+            guard case let .invalidValue(field, _) = failure.reason else {
+                return XCTFail("Expected mixed pointer-format failure")
+            }
+            XCTAssertEqual(field, "pointer_format consistency")
+            XCTAssertThrowsError(try machO.validateChainedFixups())
+        }
+    }
+
     func testSegmentFileRangeOwnsFileBackedPointerCoordinate() throws {
         let blob = makeFixupsBlob(
             segmentOffsets: [0, 0x10, 0],
@@ -631,6 +662,58 @@ private extension DyldChainedFixupsSafetyTests {
             data.write(entry, at: offset)
         }
         return data
+    }
+
+    func makeTwoSegmentFixupsBlob(
+        secondPointerFormat: UInt16
+    ) -> Data {
+        let startsOffset = 0x20
+        let importsOffset = 0x60
+        var data = Data(count: importsOffset)
+
+        data.write(UInt32(0), at: 0x00)
+        data.write(UInt32(startsOffset), at: 0x04)
+        data.write(UInt32(importsOffset), at: 0x08)
+        data.write(UInt32(importsOffset), at: 0x0C)
+        data.write(UInt32(0), at: 0x10)
+        data.write(UInt32(DYLD_CHAINED_IMPORT), at: 0x14)
+        data.write(UInt32(0), at: 0x18)
+
+        data.write(UInt32(3), at: startsOffset)
+        data.write(UInt32(0), at: startsOffset + 4)
+        data.write(UInt32(0x10), at: startsOffset + 8)
+        data.write(UInt32(0x28), at: startsOffset + 12)
+        writeFixupsSegment(
+            at: 0x30,
+            pointerFormat: UInt16(DYLD_CHAINED_PTR_64_OFFSET),
+            segmentOffset: 0x4000,
+            pageStart: 0,
+            in: &data
+        )
+        writeFixupsSegment(
+            at: 0x48,
+            pointerFormat: secondPointerFormat,
+            segmentOffset: 0x8000,
+            pageStart: 0x100,
+            in: &data
+        )
+        return data
+    }
+
+    func writeFixupsSegment(
+        at offset: Int,
+        pointerFormat: UInt16,
+        segmentOffset: UInt64,
+        pageStart: UInt16,
+        in data: inout Data
+    ) {
+        data.write(UInt32(24), at: offset)
+        data.write(UInt16(0x1000), at: offset + 4)
+        data.write(pointerFormat, at: offset + 6)
+        data.write(segmentOffset, at: offset + 8)
+        data.write(UInt32(0), at: offset + 16)
+        data.write(UInt16(1), at: offset + 20)
+        data.write(pageStart, at: offset + 22)
     }
 
     func makeMachO(
