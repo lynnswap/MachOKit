@@ -80,6 +80,7 @@ extension DyldChainedFixupPointer {
             } else {
                 var unpacked = rebase.unpackedTarget
                 if [.arm64e, .arm64e_firmware].contains(format) {
+                    guard unpacked >= preferedLoadAddress else { return nil }
                     unpacked -= preferedLoadAddress
                 }
                 return unpacked
@@ -88,6 +89,7 @@ extension DyldChainedFixupPointer {
         case ._64_offset:
             var unpacked = rebase.unpackedTarget
             if format == ._64 {
+                guard unpacked >= preferedLoadAddress else { return nil }
                 unpacked -= preferedLoadAddress
             }
             return unpacked
@@ -95,9 +97,13 @@ extension DyldChainedFixupPointer {
         case .x86_64_kernel_cache:
             return numericCast(rebase.target)
         case ._32:
-            return numericCast(rebase.target) - preferedLoadAddress
+            let target = UInt64(rebase.target)
+            guard target >= preferedLoadAddress else { return nil }
+            return target - preferedLoadAddress
         case ._32_firmware:
-            return numericCast(rebase.target) - preferedLoadAddress
+            let target = UInt64(rebase.target)
+            guard target >= preferedLoadAddress else { return nil }
+            return target - preferedLoadAddress
         case .arm64e_shared_cache:
             return numericCast(rebase.target)
         case .arm64e_segmented(let info): // FIXME: Check when new dylds are released.
@@ -115,8 +121,21 @@ extension DyldChainedFixupPointer {
                 targetSegOffset = rebase.layout.targetSegOffset
                 targetSegIndex = rebase.layout.targetSegIndex
             }
-            let segment = machO.segments[numericCast(targetSegIndex)]
-            return numericCast(segment.virtualMemoryAddress) - preferedLoadAddress + numericCast(targetSegOffset)
+            let segmentIndex = Int(targetSegIndex)
+            let virtualMemoryAddress: UInt64
+            if machO.is64Bit {
+                let segments = Array(machO.segments64)
+                guard segments.indices.contains(segmentIndex) else { return nil }
+                virtualMemoryAddress = segments[segmentIndex].layout.vmaddr
+            } else {
+                let segments = Array(machO.segments32)
+                guard segments.indices.contains(segmentIndex) else { return nil }
+                virtualMemoryAddress = UInt64(segments[segmentIndex].layout.vmaddr)
+            }
+            guard virtualMemoryAddress >= preferedLoadAddress else { return nil }
+            let baseOffset = virtualMemoryAddress - preferedLoadAddress
+            let (result, overflow) = baseOffset.addingReportingOverflow(UInt64(targetSegOffset))
+            return overflow ? nil : result
         default:
             return nil
         }
