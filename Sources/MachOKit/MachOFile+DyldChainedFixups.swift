@@ -575,7 +575,8 @@ extension MachOFile.DyldChainedFixups {
     private func validateSegmentCount(in machO: MachOFile) throws {
         let starts = try parser.startsInImage()
         let segmentCount = machOSegmentCount(in: machO)
-        guard Int(exactly: starts.layout.seg_count) == segmentCount else {
+        guard let fixupSegmentCount = Int(exactly: starts.layout.seg_count),
+              fixupSegmentCount <= segmentCount else {
             throw DyldChainedFixupsReadError(
                 location: .segmentOffsets,
                 reason: .invalidValue(

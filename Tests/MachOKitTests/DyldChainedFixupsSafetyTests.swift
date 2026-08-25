@@ -422,12 +422,11 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
     }
 
     func testSegmentCountAndPageSizeMustMatchMachOContracts() throws {
-        var wrongSegmentCount = makeFixupsBlob(
-            segmentOffsets: [0, 0x10, 0],
-            segmentRelativeOffset: 0x10,
+        let wrongSegmentCount = makeFixupsBlob(
+            segmentOffsets: [0, 0x14, 0, 0],
+            segmentRelativeOffset: 0x14,
             entries: [0]
         )
-        wrongSegmentCount.write(UInt32(2), at: 0x20)
         try withMachOFile(data: makeMachO(fixupsBlob: wrongSegmentCount)) { machO in
             XCTAssertThrowsError(try machO.validateChainedFixups())
         }
@@ -440,6 +439,33 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
         )
         try withMachOFile(data: makeMachO(fixupsBlob: wrongPageSize)) { machO in
             XCTAssertThrowsError(try machO.validateChainedFixups())
+        }
+    }
+
+    func testFixupsMayOmitNoRelocationSuffixSegment() throws {
+        let blob = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            entries: [0]
+        )
+        var machOData = makeMachO(fixupsBlob: blob)
+        machOData.write(UInt32(5), at: 16)
+        machOData.write(UInt32(72 * 4 + 16), at: 20)
+        writeSegment64(
+            name: "__CTF",
+            vmAddress: 0x1_0000_9000,
+            vmSize: 0,
+            fileOffset: 0,
+            fileSize: 0,
+            flags: UInt32(SG_NORELOC),
+            at: 32 + 72 * 3 + 16,
+            in: &machOData
+        )
+
+        try withMachOFile(data: machOData) { machO in
+            try machO.validateChainedFixups()
+            let fixups = try XCTUnwrap(machO.dyldChainedFixups)
+            XCTAssertEqual(fixups.pointerReport(in: machO).pointers.map(\.offset), [0x1000])
         }
     }
 
@@ -698,6 +724,7 @@ private extension DyldChainedFixupsSafetyTests {
         vmSize: UInt64,
         fileOffset: UInt64,
         fileSize: UInt64,
+        flags: UInt32 = 0,
         at offset: Int,
         in data: inout Data
     ) {
@@ -712,7 +739,7 @@ private extension DyldChainedFixupsSafetyTests {
         data.write(UInt32(bitPattern: VM_PROT_READ | VM_PROT_WRITE), at: offset + 56)
         data.write(UInt32(bitPattern: VM_PROT_READ | VM_PROT_WRITE), at: offset + 60)
         data.write(UInt32(0), at: offset + 64)
-        data.write(UInt32(0), at: offset + 68)
+        data.write(flags, at: offset + 68)
     }
 
     func writeSegment32(
