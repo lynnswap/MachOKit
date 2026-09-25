@@ -925,6 +925,16 @@ extension MachOFile {
 extension MachOFile {
     // MARK: - Resolve Rebase/Bind with Cache
 
+    /// Returns the encoded chained fixup at a Mach-O-relative file offset.
+    ///
+    /// Uses the same lazily built index as the rebase and bind resolvers.
+    /// A bind is returned even when its import ordinal cannot be resolved.
+    @_spi(Support)
+    public func chainedFixupPointer(at offset: UInt64) -> DyldChainedFixupPointer? {
+        guard let offset = Int(exactly: offset) else { return nil }
+        return fixupPointersCache.pointersByFileOffset[offset]
+    }
+
     // https://github.com/apple-oss-distributions/dyld/blob/d552c40cd1de105f0ec95008e0e0c0972de43456/common/MetadataVisitor.cpp#L262
     public func resolveRebase(at offset: UInt64) -> UInt64? {
         if isLoadedFromDyldCache,

@@ -304,6 +304,11 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
             XCTAssertNil(fixups.pointer(for: 0x4000, in: machO))
             XCTAssertEqual(machO.resolveRebase(at: 0x1000), 0)
             XCTAssertNil(machO.resolveRebase(at: 0x4000))
+            XCTAssertEqual(machO.chainedFixupPointer(at: 0x1000)?.offset, 0x1000)
+            XCTAssertNil(machO.chainedFixupPointer(at: 0x4000))
+            XCTAssertNil(machO.chainedFixupPointer(at: .max))
+            machO.invalidateChainedFixupsCache()
+            XCTAssertEqual(machO.chainedFixupPointer(at: 0x1000)?.offset, 0x1000)
         }
     }
 
@@ -551,6 +556,7 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
         machOData.write(UInt64(0x8000_0000_0000_0001), at: 0x1000)
         try withMachOFile(data: machOData) { machO in
             XCTAssertNil(machO.resolveBind(at: 0x1000))
+            XCTAssertEqual(machO.chainedFixupPointer(at: 0x1000)?.fixupInfo.bind?.ordinal, 1)
             XCTAssertThrowsError(try machO.validateChainedFixups()) { error in
                 XCTAssertEqual((error as? DyldChainedFixupsReadError)?.location, .imports)
             }
