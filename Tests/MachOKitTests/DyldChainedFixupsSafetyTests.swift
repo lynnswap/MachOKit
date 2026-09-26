@@ -669,6 +669,35 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
         XCTAssertNil(segment.fileRange)
     }
 
+    func testGenericSymbolLookupRetainsDefaultArguments() throws {
+        let blob = makeFixupsBlob(segmentOffsets: [0, 0x10, 0], segmentRelativeOffset: 0x10, entries: [0])
+        var data = makeMachO(fixupsBlob: blob)
+        data.write(UInt32(5), at: 16)
+        data.write(UInt32(72 * 3 + 16 + 24), at: 20)
+        let command = 32 + 72 * 3 + 16
+        for (delta, value) in [(0, UInt32(LC_SYMTAB)), (4, 24), (8, 0x2100), (12, 2), (16, 0x2180), (20, 14)] {
+            data.write(value, at: command + delta)
+        }
+        for (index, name, flags, value) in [(0, 1, N_SECT, UInt64(0x1_0000_0190)), (1, 7, N_SECT | N_EXT, UInt64(0x1_0000_0180))] {
+            var symbol = nlist_64()
+            symbol.n_un.n_strx = UInt32(name)
+            symbol.n_type = UInt8(flags)
+            symbol.n_sect = 1
+            symbol.n_value = value
+            data.write(symbol, at: 0x2100 + index * MemoryLayout<nlist_64>.size)
+        }
+        data.replaceSubrange(0x2180..<0x218e, with: Data("\0local\0global\0".utf8))
+        func check<M: MachORepresentable>(_ machO: M) {
+            XCTAssertEqual(machO.closestSymbol(at: 0x200)?.name, "local")
+            XCTAssertEqual(machO.closestSymbol(at: 0x200, isGlobalOnly: true)?.name, "global")
+            XCTAssertNil(machO.closestSymbol(at: 0x200, inSection: 2))
+            XCTAssertEqual(machO.closestSymbols(at: 0x200).map(\.name), ["local"])
+            XCTAssertEqual(machO.closestSymbols(at: 0x200, isGlobalOnly: true).map(\.name), ["global"])
+            XCTAssertTrue(machO.closestSymbols(at: 0x200, inSection: 2).isEmpty)
+        }
+        try withMachOFile(data: data, check)
+    }
+
     func testPointerIndexRejectsDuplicateFileOffsetsAtInsertionOwner() {
         let pointer = DyldChainedFixupPointer(
             offset: 0x1000,

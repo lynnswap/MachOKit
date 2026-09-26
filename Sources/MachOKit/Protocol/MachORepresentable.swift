@@ -392,6 +392,24 @@ extension MachORepresentable {
     }
 }
 
+extension MachORepresentable {
+    public func closestSymbol(at offset: Int, inSection sectionNumber: Int = 0) -> Symbol? {
+        closestSymbol(at: offset, inSection: sectionNumber, isGlobalOnly: false)
+    }
+
+    public func closestSymbol(at offset: Int, isGlobalOnly: Bool) -> Symbol? {
+        closestSymbol(at: offset, inSection: 0, isGlobalOnly: isGlobalOnly)
+    }
+
+    public func closestSymbols(at offset: Int, inSection sectionNumber: Int = 0) -> [Symbol] {
+        closestSymbols(at: offset, inSection: sectionNumber, isGlobalOnly: false)
+    }
+
+    public func closestSymbols(at offset: Int, isGlobalOnly: Bool) -> [Symbol] {
+        closestSymbols(at: offset, inSection: 0, isGlobalOnly: isGlobalOnly)
+    }
+}
+
 extension MachORepresentable where Self == MachOFile {
     public func closestSymbol(
         at offset: Int,

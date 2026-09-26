@@ -192,9 +192,7 @@ extension MachOFile.DyldChainedFixups {
         for offset: UInt64,
         in machO: MachOFile
     ) -> DyldChainedFixupPointer? {
-        pointerReport(in: machO).pointers.first {
-            UInt64(exactly: $0.offset) == offset
-        }
+        machO.chainedFixupPointer(at: offset)
     }
 
     internal func pointerReport(in machO: MachOFile) -> DyldChainedFixupPointerReport {
