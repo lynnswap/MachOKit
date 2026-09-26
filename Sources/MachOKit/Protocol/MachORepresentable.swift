@@ -54,6 +54,11 @@ public protocol MachORepresentable {
     /// Sequence of 32-bit architecture segments
     var segments32: AnySequence<SegmentCommand> { get }
 
+    /// The preferred unslid virtual address at which the Mach-O header is loaded.
+    ///
+    /// This is normally the virtual memory address of the `__TEXT` segment.
+    var preferredLoadAddress: UInt64? { get }
+
     /// List of sections in all segments
     var sections: [any SectionProtocol] { get }
     /// List of sections in 64-bit architecture segments
@@ -304,6 +309,16 @@ extension MachORepresentable {
     public var segments32: AnySequence<SegmentCommand> {
         loadCommands.infos(of: LoadCommand.segment)
     }
+
+    public var preferredLoadAddress: UInt64? {
+        if let text = loadCommands.text64 {
+            text.vmaddr
+        } else if let text = loadCommands.text {
+            numericCast(text.vmaddr)
+        } else {
+            nil
+        }
+    }
 }
 
 extension MachORepresentable {
@@ -374,6 +389,161 @@ extension MachORepresentable {
             by: { lhs, rhs in lhs.fileOffset < rhs.fileOffset }
         ) else { return nil }
         return segment.fileOffset + segment.fileSize
+    }
+}
+
+// Custom conformers keep the collection-based defaults. The concrete readers
+// below can inspect raw symbol records without eagerly decoding every name.
+extension MachORepresentable {
+    public func closestSymbol( // swiftlint:disable:this cyclomatic_complexity
+        at offset: Int,
+        inSection sectionNumber: Int = 0,
+        isGlobalOnly: Bool = false
+    ) -> Symbol? {
+        let symbols = Array(self.symbols)
+        var bestSymbol: Symbol?
+
+        if let dysym = loadCommands.dysymtab {
+            // find closest match in globals
+            let globalStart = UInt64(dysym.iextdefsym)
+            let globalCount = UInt64(dysym.nextdefsym)
+            for i in symbols.indices where (globalStart ..< globalStart + globalCount).contains(UInt64(i)) {
+                let symbol = symbols[i]
+                let nlist = symbol.nlist
+                let symbolSectionNumber = symbol.nlist.sectionNumber
+
+                guard nlist.flags?.type == .sect,
+                      symbol.offset <= offset,
+                      sectionNumber == 0 || symbolSectionNumber == sectionNumber else {
+                    continue
+                }
+                if let bestSymbol,
+                   bestSymbol.offset >= symbol.offset {
+                    continue
+                }
+                bestSymbol = symbol
+            }
+            if isGlobalOnly { return bestSymbol }
+
+            // find closest match in locals
+            let localStart = UInt64(dysym.ilocalsym)
+            let localCount = UInt64(dysym.nlocalsym)
+            for i in symbols.indices where (localStart ..< localStart + localCount).contains(UInt64(i)) {
+                let symbol = symbols[i]
+                let nlist = symbol.nlist
+                let symbolSectionNumber = symbol.nlist.sectionNumber
+
+                guard nlist.flags?.type == .sect,
+                      nlist.flags?.stab == nil,
+                      symbol.offset <= offset,
+                      sectionNumber == 0 || symbolSectionNumber == sectionNumber else {
+                    continue
+                }
+                if let bestSymbol,
+                   bestSymbol.offset >= symbol.offset {
+                    continue
+                }
+                bestSymbol = symbol
+            }
+        } else {
+            // find closest match in locals
+            for symbol in symbols {
+                let nlist = symbol.nlist
+                let symbolSectionNumber = symbol.nlist.sectionNumber
+                guard nlist.flags?.type == .sect,
+                      nlist.flags?.stab == nil,
+                      symbol.offset <= offset,
+                      !isGlobalOnly || nlist.flags?.contains(.ext) ?? false,
+                      sectionNumber == 0 || symbolSectionNumber == sectionNumber else {
+                    continue
+                }
+                if let bestSymbol,
+                   bestSymbol.offset >= symbol.offset {
+                    continue
+                }
+                bestSymbol = symbol
+            }
+        }
+
+        return bestSymbol
+    }
+
+    public func closestSymbols( // swiftlint:disable:this cyclomatic_complexity
+        at offset: Int,
+        inSection sectionNumber: Int = 0,
+        isGlobalOnly: Bool = false
+    ) -> [Symbol] {
+        let symbols = Array(self.symbols)
+        var bestOffset: Int?
+        var bestSymbols: [Symbol] = []
+
+        func updateBestSymbols(_ symbol: Symbol) {
+            if let _bestOffset = bestOffset {
+                if _bestOffset > symbol.offset {
+                    return
+                } else if _bestOffset == symbol.offset {
+                    bestSymbols.append(symbol)
+                } else {
+                    bestOffset = symbol.offset
+                    bestSymbols = [symbol]
+                }
+            } else {
+                bestOffset = symbol.offset
+                bestSymbols = [symbol]
+            }
+        }
+
+        if let dysym = loadCommands.dysymtab {
+            // find closest match in globals
+            let globalStart = UInt64(dysym.iextdefsym)
+            let globalCount = UInt64(dysym.nextdefsym)
+            for i in symbols.indices where (globalStart ..< globalStart + globalCount).contains(UInt64(i)) {
+                let symbol = symbols[i]
+                let nlist = symbol.nlist
+                let symbolSectionNumber = symbol.nlist.sectionNumber
+
+                guard nlist.flags?.type == .sect,
+                      symbol.offset <= offset,
+                      sectionNumber == 0 || symbolSectionNumber == sectionNumber else {
+                    continue
+                }
+                updateBestSymbols(symbol)
+            }
+            if isGlobalOnly { return bestSymbols }
+
+            // find closest match in locals
+            let localStart = UInt64(dysym.ilocalsym)
+            let localCount = UInt64(dysym.nlocalsym)
+            for i in symbols.indices where (localStart ..< localStart + localCount).contains(UInt64(i)) {
+                let symbol = symbols[i]
+                let nlist = symbol.nlist
+                let symbolSectionNumber = symbol.nlist.sectionNumber
+
+                guard nlist.flags?.type == .sect,
+                      nlist.flags?.stab == nil,
+                      symbol.offset <= offset,
+                      sectionNumber == 0 || symbolSectionNumber == sectionNumber else {
+                    continue
+                }
+                updateBestSymbols(symbol)
+            }
+        } else {
+            // find closest match in locals
+            for symbol in symbols {
+                let nlist = symbol.nlist
+                let symbolSectionNumber = symbol.nlist.sectionNumber
+                guard nlist.flags?.type == .sect,
+                      nlist.flags?.stab == nil,
+                      symbol.offset <= offset,
+                      !isGlobalOnly || nlist.flags?.contains(.ext) ?? false,
+                      sectionNumber == 0 || symbolSectionNumber == sectionNumber else {
+                    continue
+                }
+                updateBestSymbols(symbol)
+            }
+        }
+
+        return bestSymbols
     }
 }
 
@@ -997,8 +1167,6 @@ extension MachORepresentable {
     /// [xnu implementation](https://github.com/apple-oss-distributions/xnu/blob/8d741a5de7ff4191bf97d57b9f54c2f6d4a15585/osfmk/mach/arm/vm_param.h#L126)
     private var vmaddrMask: UInt64? {
         switch header.cpuType {
-        case .x86:
-            return 0xFFFFFFFF
         case .i386:
             return 0xFFFFFFFF
         case .x86_64:

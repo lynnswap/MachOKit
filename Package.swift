@@ -1,4 +1,4 @@
-// swift-tools-version: 5.10
+// swift-tools-version: 6.3
 
 import PackageDescription
 
@@ -43,16 +43,13 @@ let package = Package(
             url: "https://github.com/p-x9/ObjectArchiveKit.git",
             from: "0.5.0"
         ),
-        // Swift Crypto 4.4 and Swift ASN.1 1.7 require Swift 6.1. Keep the latest
-        // releases that support the Swift 6.0 Linux toolchain while allowing
-        // downstream packages to resolve Swift Crypto 4.
         .package(
             url: "https://github.com/apple/swift-crypto.git",
-            "1.0.0" ..< "4.4.0"
+            "1.0.0" ..< "5.0.0"
         ),
         .package(
             url: "https://github.com/apple/swift-asn1.git",
-            "1.2.0" ..< "1.7.0"
+            from: "1.2.0"
         ),
     ],
     targets: [
@@ -98,7 +95,8 @@ let package = Package(
             name: "MachOKitTests",
             dependencies: ["MachOKit", "MachOArchiveKit", "MachOKitReadable"]
         )
-    ]
+    ],
+    swiftLanguageModes: [.v5]
 )
 
 let machOKit = package.targets.first(where: { $0.name == "MachOKit" })

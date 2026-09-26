@@ -26,12 +26,21 @@ extension MachOImage.DyldChainedFixups {
         ) else {
             return nil
         }
-
+        let dataOffset = UInt64(dyldChainedFixups.dataoff)
+        let dataSize = UInt64(dyldChainedFixups.datasize)
+        let linkeditOffset = linkedit.layout.fileoff
+        let linkeditSize = linkedit.layout.filesize
+        guard dataOffset >= linkeditOffset else { return nil }
+        let relativeOffset = dataOffset - linkeditOffset
+        guard relativeOffset <= linkeditSize,
+              dataSize <= linkeditSize - relativeOffset,
+              let relativeOffset = Int(exactly: relativeOffset),
+              let size = Int(exactly: dataSize) else {
+            return nil
+        }
         let start = linkeditStartPtr
-            .advanced(by: -numericCast(linkedit.fileoff))
-            .advanced(by: numericCast(dyldChainedFixups.dataoff))
+            .advanced(by: relativeOffset)
             .assumingMemoryBound(to: UInt8.self)
-        let size: Int = numericCast(dyldChainedFixups.datasize)
 
         self.init(
             basePointer: start,
@@ -49,12 +58,21 @@ extension MachOImage.DyldChainedFixups {
         ) else {
             return nil
         }
-
+        let dataOffset = UInt64(dyldChainedFixups.dataoff)
+        let dataSize = UInt64(dyldChainedFixups.datasize)
+        let linkeditOffset = UInt64(linkedit.layout.fileoff)
+        let linkeditSize = UInt64(linkedit.layout.filesize)
+        guard dataOffset >= linkeditOffset else { return nil }
+        let relativeOffset = dataOffset - linkeditOffset
+        guard relativeOffset <= linkeditSize,
+              dataSize <= linkeditSize - relativeOffset,
+              let relativeOffset = Int(exactly: relativeOffset),
+              let size = Int(exactly: dataSize) else {
+            return nil
+        }
         let start = linkeditStartPtr
-            .advanced(by: -numericCast(linkedit.fileoff))
-            .advanced(by: numericCast(dyldChainedFixups.dataoff))
+            .advanced(by: relativeOffset)
             .assumingMemoryBound(to: UInt8.self)
-        let size: Int = numericCast(dyldChainedFixups.datasize)
 
         self.init(
             basePointer: start,
@@ -65,116 +83,51 @@ extension MachOImage.DyldChainedFixups {
 
 extension MachOImage.DyldChainedFixups: DyldChainedFixupsProtocol {
     public var header: DyldChainedFixupsHeader? {
-        let ptr = UnsafeRawPointer(basePointer)
-        return ptr
-            .assumingMemoryBound(to: DyldChainedFixupsHeader.self)
-            .pointee
+        try? parser.header()
     }
 
     public var startsInImage: DyldChainedStartsInImage? {
-        guard let header else { return nil }
-        let offset: Int = numericCast(header.starts_offset)
-        let ptr = UnsafeRawPointer(basePointer)
-            .advanced(by: offset)
-        let layout = ptr
-            .assumingMemoryBound(to: DyldChainedStartsInImage.Layout.self)
-            .pointee
-        return .init(layout: layout, offset: offset)
+        try? parser.startsInImage()
     }
 
     public func startsInSegments(
         of startsInImage: DyldChainedStartsInImage?
     ) -> [DyldChainedStartsInSegment] {
-        guard let startsInImage else {
-            return []
-        }
-        let offsets: [Int] = {
-            let ptr = UnsafeRawPointer(basePointer)
-                .advanced(by: startsInImage.offset)
-                .advanced(by: DyldChainedStartsInImage.layoutOffset(of: \.seg_info_offset))
-            return UnsafeBufferPointer(
-                start: ptr.assumingMemoryBound(to: UInt32.self),
-                count: numericCast(startsInImage.seg_count)
-            ).map { numericCast($0) }
-        }()
-
-        let ptr = UnsafeRawPointer(basePointer)
-            .advanced(by: startsInImage.offset)
-        return offsets.enumerated().map { index, offset in
-            let layout = ptr.advanced(by: offset)
-                .assumingMemoryBound(to: DyldChainedStartsInSegment.Layout.self)
-                .pointee
-            let offset: Int = startsInImage.offset + offset
-            return .init(
-                layout: layout,
-                offset: offset,
-                segmentIndex: index
-            )
-        }
+        guard let startsInImage else { return [] }
+        return parser.segments(of: startsInImage).value.map(\.info)
     }
 
     public func pages(
         of startsInSegment: DyldChainedStartsInSegment?
     ) -> [DyldChainedPage] {
-        guard let startsInSegment else {
+        guard let startsInSegment,
+              let segment = try? parser.segment(matching: startsInSegment) else {
             return []
         }
-
-        let ptr = UnsafeRawPointer(basePointer)
-            .advanced(by: startsInSegment.offset)
-            .advanced(by: startsInSegment.layoutOffset(of: \.page_start))
-            .assumingMemoryBound(to: UInt16.self)
-        return UnsafeBufferPointer(
-            start: ptr,
-            count: numericCast(
-                startsInSegment.page_count
-            )
-        ).enumerated().map { .init(offset: $1, index: $0) }
+        return segment.pageStarts.enumerated().map {
+            .init(offset: $1, index: $0)
+        }
     }
 
     public var imports: [DyldChainedImport] {
-        guard let header,
-              let  importsFormat = header.importsFormat else {
-            return []
-        }
-
-        let offset: Int = numericCast(header.imports_offset)
-        let ptr = UnsafeRawPointer(basePointer)
-            .advanced(by: offset)
-        let count: Int = numericCast(header.imports_count)
-
-        switch importsFormat {
-        case .general:
-            return UnsafeBufferPointer(
-                start: ptr
-                    .assumingMemoryBound(to: DyldChainedImportGeneral.self),
-                count: count
-            ).map { .general($0) }
-
-        case .addend:
-            return UnsafeBufferPointer(
-                start: ptr
-                    .assumingMemoryBound(to: DyldChainedImportAddend.self),
-                count: count
-            ).map { .addend($0) }
-
-        case .addend64:
-            return UnsafeBufferPointer(
-                start: ptr
-                    .assumingMemoryBound(to: DyldChainedImportAddend64.self),
-                count: count
-            ).map { .addend64($0) }
-        }
+        (try? parser.imports()) ?? []
     }
 
     public func symbolName(for nameOffset: Int) -> String? {
-        guard let header else {
-            return nil
-        }
-        let ptr = UnsafeRawPointer(basePointer)
-            .advanced(by: numericCast(header.symbols_offset))
-            .advanced(by: nameOffset)
-            .assumingMemoryBound(to: CChar.self)
-        return String(cString: ptr)
+        try? parser.symbolName(for: nameOffset)
+    }
+}
+
+extension MachOImage.DyldChainedFixups {
+    internal var parser: DyldChainedFixupsParser {
+        .init(
+            view: .init(
+                bytes: .init(
+                    start: basePointer,
+                    count: dyldChainedFixupsSize
+                )
+            ),
+            isSwapped: false
+        )
     }
 }

@@ -20,6 +20,9 @@ public protocol SegmentCommandProtocol: LoadCommandWrapper {
     var initialProtection: VMProtection { get }
     var numberOfSections: Int { get }
     var flags: SegmentCommandFlags { get }
+    var virtualMemoryRange: Range<UInt64>? { get }
+    var fileBackedVirtualMemoryRange: Range<UInt64>? { get }
+    var fileRange: Range<UInt64>? { get }
 
     func startPtr(vmaddrSlide: Int) -> UnsafeRawPointer?
     func endPtr(vmaddrSlide: Int) -> UnsafeRawPointer?
@@ -31,7 +34,8 @@ public protocol SegmentCommandProtocol: LoadCommandWrapper {
 
 extension SegmentCommandProtocol {
     public func startPtr(vmaddrSlide: Int) -> UnsafeRawPointer? {
-        let address = vmaddrSlide + virtualMemoryAddress
+        let (address, overflow) = virtualMemoryAddress.addingReportingOverflow(vmaddrSlide)
+        guard !overflow else { return nil }
         return UnsafeRawPointer(bitPattern: address)
     }
 
@@ -39,13 +43,79 @@ extension SegmentCommandProtocol {
         guard let start = startPtr(vmaddrSlide: vmaddrSlide) else {
             return nil
         }
-        return start + virtualMemorySize
+        let (address, overflow) = Int(bitPattern: start)
+            .addingReportingOverflow(virtualMemorySize)
+        guard !overflow else { return nil }
+        return UnsafeRawPointer(bitPattern: address)
+    }
+}
+
+extension SegmentCommandProtocol {
+    /// The segment's unslid virtual address range, including zero-fill memory.
+    /// Returns `nil` if the range cannot be represented.
+    public var virtualMemoryRange: Range<UInt64>? {
+        range(start: virtualMemoryAddress, size: virtualMemorySize)
+    }
+
+    /// The unslid virtual address range backed by the segment's file bytes.
+    /// Excludes zero-fill memory beyond `fileSize`.
+    /// Returns `nil` if the range cannot be represented.
+    public var fileBackedVirtualMemoryRange: Range<UInt64>? {
+        range(start: virtualMemoryAddress, size: fileSize)
+    }
+
+    /// The file-offset range described by the segment's `fileoff` and `filesize`.
+    /// No enclosing fat-file slice offset or runtime slide is added.
+    /// Returns `nil` if the range cannot be represented.
+    public var fileRange: Range<UInt64>? {
+        range(start: fileOffset, size: fileSize)
+    }
+
+    private func range(start: Int, size: Int) -> Range<UInt64>? {
+        guard let start = UInt64(exactly: start),
+              let size = UInt64(exactly: size) else { return nil }
+        let (end, overflow) = start.addingReportingOverflow(size)
+        guard !overflow else { return nil }
+        return start..<end
+    }
+}
+
+private func segmentRange(start: UInt64, size: UInt64) -> Range<UInt64>? {
+    let (end, overflow) = start.addingReportingOverflow(size)
+    return overflow ? nil : start..<end
+}
+
+extension SegmentCommand {
+    public var virtualMemoryRange: Range<UInt64>? {
+        segmentRange(start: UInt64(layout.vmaddr), size: UInt64(layout.vmsize))
+    }
+
+    public var fileBackedVirtualMemoryRange: Range<UInt64>? {
+        segmentRange(start: UInt64(layout.vmaddr), size: UInt64(layout.filesize))
+    }
+
+    public var fileRange: Range<UInt64>? {
+        segmentRange(start: UInt64(layout.fileoff), size: UInt64(layout.filesize))
+    }
+}
+
+extension SegmentCommand64 {
+    public var virtualMemoryRange: Range<UInt64>? {
+        segmentRange(start: layout.vmaddr, size: layout.vmsize)
+    }
+
+    public var fileBackedVirtualMemoryRange: Range<UInt64>? {
+        segmentRange(start: layout.vmaddr, size: layout.filesize)
+    }
+
+    public var fileRange: Range<UInt64>? {
+        segmentRange(start: layout.fileoff, size: layout.filesize)
     }
 }
 
 extension SegmentCommandProtocol {
     public func contains(unslidAddress address: UInt64) -> Bool {
-        virtualMemoryAddress <= address && address < virtualMemoryAddress + virtualMemorySize
+        virtualMemoryRange?.contains(address) ?? false
     }
 }
 

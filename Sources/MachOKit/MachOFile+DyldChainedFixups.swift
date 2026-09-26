@@ -16,6 +16,12 @@ internal import FileIOBinary
 #endif
 import MachOKitC
 
+internal enum MachOFileChainedFixupsSourceState {
+    case absent
+    case available(MachOFile.DyldChainedFixups)
+    case failed(DyldChainedFixupsReadError)
+}
+
 extension MachOFile {
     public struct DyldChainedFixups {
         typealias FileSlice = File.FileSlice
@@ -27,57 +33,18 @@ extension MachOFile {
 
 extension MachOFile.DyldChainedFixups: DyldChainedFixupsProtocol {
     public var header: DyldChainedFixupsHeader? {
-        let ret = fileSlice.ptr
-            .assumingMemoryBound(to: DyldChainedFixupsHeader.self)
-            .pointee
-        return isSwapped ? ret.swapped : ret
+        try? parser.header()
     }
 
     public var startsInImage: DyldChainedStartsInImage? {
-        guard let header else { return nil }
-        let offset: Int = numericCast(header.starts_offset)
-        let ptr = fileSlice.ptr
-            .advanced(by: offset)
-        let layout = ptr
-            .assumingMemoryBound(to: DyldChainedStartsInImage.Layout.self)
-            .pointee
-        let ret: DyldChainedStartsInImage = .init(
-            layout: layout,
-            offset: offset
-        )
-        return isSwapped ? ret.swapped : ret
+        try? parser.startsInImage()
     }
 
     public func startsInSegments(
         of startsInImage: DyldChainedStartsInImage?
     ) -> [DyldChainedStartsInSegment] {
         guard let startsInImage else { return [] }
-        let offsets: [Int] = {
-            let ptr = fileSlice.ptr
-                .advanced(by: startsInImage.offset)
-                .advanced(by: DyldChainedStartsInImage.layoutOffset(of: \.seg_info_offset))
-            return UnsafeBufferPointer(
-                start: ptr.assumingMemoryBound(to: UInt32.self),
-                count: numericCast(startsInImage.seg_count)
-            )
-            .map { isSwapped ? $0.byteSwapped : $0 }
-            .map { numericCast($0) }
-        }()
-
-        let ptr = fileSlice.ptr
-            .advanced(by: startsInImage.offset)
-        return offsets.enumerated().map { index, offset in
-            let layout = ptr.advanced(by: offset)
-                .assumingMemoryBound(to: DyldChainedStartsInSegment.Layout.self)
-                .pointee
-            let offset: Int = startsInImage.offset + offset
-            let ret: DyldChainedStartsInSegment = .init(
-                layout: layout,
-                offset: offset,
-                segmentIndex: index
-            )
-            return isSwapped ? ret.swapped : ret
-        }
+        return parser.segments(of: startsInImage).value.map(\.info)
     }
 
     // xcrun dyld_info -fixup_chains "Path to Binary"
@@ -85,71 +52,126 @@ extension MachOFile.DyldChainedFixups: DyldChainedFixupsProtocol {
         of startsInSegment: DyldChainedStartsInSegment?
     ) -> [DyldChainedPage] {
         guard let startsInSegment else { return [] }
-
-        let ptr = fileSlice.ptr
-            .advanced(by: startsInSegment.offset)
-            .advanced(by: startsInSegment.layoutOffset(of: \.page_start))
-            .assumingMemoryBound(to: UInt16.self)
-        return UnsafeBufferPointer(
-            start: ptr,
-            count: numericCast(
-                startsInSegment.page_count
-            )
-        )
-        .map {
-            isSwapped ? $0.byteSwapped : $0
+        guard let segment = try? parser.segment(matching: startsInSegment) else {
+            return []
         }
-        .enumerated().map { .init(offset: $1, index: $0) }
+        return segment.pageStarts.enumerated().map {
+            .init(offset: $1, index: $0)
+        }
     }
 
     public var imports: [DyldChainedImport] {
-        guard let header,
-              let  importsFormat = header.importsFormat else {
-            return []
-        }
-        let offset: Int = numericCast(header.imports_offset)
-        let ptr = fileSlice.ptr
-            .advanced(by: offset)
-        let count: Int = numericCast(header.imports_count)
-
-        switch importsFormat {
-        case .general:
-            return UnsafeBufferPointer(
-                start: ptr
-                    .assumingMemoryBound(to: DyldChainedImportGeneral.self),
-                count: count
-            )
-            .map { isSwapped ? $0.swapped : $0 }
-            .map { .general($0) }
-
-        case .addend:
-            return UnsafeBufferPointer(
-                start: ptr
-                    .assumingMemoryBound(to: DyldChainedImportAddend.self),
-                count: count
-            )
-            .map { isSwapped ? $0.swapped : $0 }
-            .map { .addend($0) }
-
-        case .addend64:
-            return UnsafeBufferPointer(
-                start: ptr
-                    .assumingMemoryBound(to: DyldChainedImportAddend64.self),
-                count: count
-            )
-            .map { isSwapped ? $0.swapped : $0 }
-            .map { .addend64($0) }
-        }
+        (try? parser.imports()) ?? []
     }
 
     public func symbolName(for nameOffset: Int) -> String? {
-        guard let header else { return nil }
-        let ptr = fileSlice.ptr
-            .advanced(by: numericCast(header.symbols_offset))
-            .advanced(by: nameOffset)
-            .assumingMemoryBound(to: CChar.self)
-        return String(cString: ptr)
+        try? parser.symbolName(for: nameOffset)
     }
+}
+
+extension MachOFile.DyldChainedFixups {
+    internal var parser: DyldChainedFixupsParser {
+        .init(
+            view: .init(
+                bytes: .init(start: fileSlice.ptr, count: fileSlice.size)
+            ),
+            isSwapped: isSwapped
+        )
+    }
+}
+
+extension MachOFile {
+    internal func loadChainedFixupsSourceState() -> MachOFileChainedFixupsSourceState {
+        guard let info = loadCommands.dyldChainedFixups else {
+            return .absent
+        }
+        let offset = UInt64(info.layout.dataoff)
+        let byteCount = UInt64(info.layout.datasize)
+        guard let linkeditRange = chainedFixupsLinkeditRange(),
+              offset >= linkeditRange.offset,
+              byteCount > 0 else {
+            return .failed(
+                .init(
+                    location: .payload,
+                    reason: .invalidRange(
+                        offset: offset,
+                        byteCount: byteCount,
+                        availableByteCount: 0
+                    )
+                )
+            )
+        }
+        let relativeOffset = offset - linkeditRange.offset
+        guard relativeOffset <= linkeditRange.size,
+              byteCount <= linkeditRange.size - relativeOffset,
+              let intOffset = Int(exactly: offset),
+              let intByteCount = Int(exactly: byteCount),
+              let fileSlice = _fileSliceForLinkEditData(
+                offset: intOffset,
+                length: intByteCount
+              ) else {
+            return .failed(
+                .init(
+                    location: .payload,
+                    reason: .invalidRange(
+                        offset: offset,
+                        byteCount: byteCount,
+                        availableByteCount: Int(exactly: linkeditRange.size) ?? 0
+                    )
+                )
+            )
+        }
+        return .available(
+            .init(fileSlice: fileSlice, isSwapped: isSwapped)
+        )
+    }
+
+    private func chainedFixupsLinkeditRange() -> (offset: UInt64, size: UInt64)? {
+        if let linkedit = loadCommands.linkedit64 {
+            return (linkedit.layout.fileoff, linkedit.layout.filesize)
+        }
+        if let linkedit = loadCommands.linkedit {
+            return (
+                UInt64(linkedit.layout.fileoff),
+                UInt64(linkedit.layout.filesize)
+            )
+        }
+        return nil
+    }
+}
+
+internal struct DyldChainedFixupPointerReport {
+    var pointers: [DyldChainedFixupPointer]
+    var failures: [DyldChainedFixupsReadError]
+}
+
+internal struct DyldChainedFixupPointerIndex {
+    var pointersByFileOffset: [Int: DyldChainedFixupPointer]
+    var orderedPointers: [DyldChainedFixupPointer]
+    var failures: [DyldChainedFixupsReadError]
+
+    mutating func insert(_ pointer: DyldChainedFixupPointer) {
+        guard pointersByFileOffset[pointer.offset] == nil else {
+            failures.append(
+                .init(
+                    location: .resolver,
+                    reason: .invalidValue(
+                        field: "duplicatePointerOffset",
+                        value: UInt64(exactly: pointer.offset) ?? 0
+                    )
+                )
+            )
+            return
+        }
+        pointersByFileOffset[pointer.offset] = pointer
+        orderedPointers.append(pointer)
+    }
+}
+
+private struct DyldChainedFixupFileSegment {
+    let fileOffset: UInt64
+    let fileSize: UInt64
+    let virtualMemoryOffset: UInt64
 }
 
 extension MachOFile.DyldChainedFixups {
@@ -160,276 +182,532 @@ extension MachOFile.DyldChainedFixups {
         of startsInSegment: DyldChainedStartsInSegment,
         in machO: MachOFile
     ) -> [DyldChainedFixupPointer] {
-        let pages = pages(of: startsInSegment)
-        guard pages.count > 0, startsInSegment.page_size > 0 else { return [] }
+        guard let segment = try? parser.segment(matching: startsInSegment) else {
+            return []
+        }
+        return pointerReport(for: segment, in: machO).pointers
+    }
 
-        let pagesFileSlice = try! machO.fileHandle.fileSlice(
-            offset: machO.headerStartOffset + numericCast(startsInSegment.segment_offset),
-            length: pages.count * numericCast(startsInSegment.page_size)
+    public func pointer(
+        for offset: UInt64,
+        in machO: MachOFile
+    ) -> DyldChainedFixupPointer? {
+        machO.chainedFixupPointer(at: offset)
+    }
+
+    internal func pointerReport(in machO: MachOFile) -> DyldChainedFixupPointerReport {
+        let index = pointerIndex(in: machO)
+        return .init(
+            pointers: index.orderedPointers,
+            failures: index.failures
         )
+    }
 
-        var pointers: [DyldChainedFixupPointer] = []
-
-        for (index, page) in pages.enumerated() {
-            var offsetInPage = page.offset
-
-            if page.isNone { continue }
-            if page.isMulti {
-                var overflowIndex = Int(offsetInPage & ~UInt16(DYLD_CHAINED_PTR_START_MULTI))
-                var chainEnd = false
-                while !chainEnd {
-                    chainEnd = pages[overflowIndex].offset & UInt16(DYLD_CHAINED_PTR_START_LAST) != 0
-                    offsetInPage = pages[overflowIndex].offset & ~UInt16(DYLD_CHAINED_PTR_START_LAST)
-                    let pageContentStart: Int = index * numericCast(startsInSegment.page_size)
-                    let chainOffset = pageContentStart + numericCast(offsetInPage)
-                    walkChain(offset: chainOffset, pagesFileSlice: pagesFileSlice, of: startsInSegment, pointers: &pointers)
-                    overflowIndex += 1
-                }
-            } else {
-                let pageContentStart: Int = index * numericCast(startsInSegment.page_size)
-                let chainOffset = pageContentStart + numericCast(offsetInPage)
-                walkChain(offset: chainOffset, pagesFileSlice: pagesFileSlice, of: startsInSegment, pointers: &pointers)
+    internal func pointerIndex(in machO: MachOFile) -> DyldChainedFixupPointerIndex {
+        let segmentReport = parser.segments()
+        var index = DyldChainedFixupPointerIndex(
+            pointersByFileOffset: [:],
+            orderedPointers: [],
+            failures: segmentReport.failures
+        )
+        if let failure = pointerFormatConsistencyFailure(
+            in: segmentReport.value
+        ) {
+            index.failures.append(failure)
+            return index
+        }
+        do {
+            try validateSegmentCount(in: machO)
+        } catch let error as DyldChainedFixupsReadError {
+            if !index.failures.contains(error) {
+                index.failures.append(error)
+            }
+            return index
+        } catch {
+            index.failures.append(.init(location: .startsInImage, reason: .arithmeticOverflow))
+            return index
+        }
+        for segment in segmentReport.value {
+            let segmentPointers = pointerReport(for: segment, in: machO)
+            index.failures.append(contentsOf: segmentPointers.failures)
+            for pointer in segmentPointers.pointers {
+                index.insert(pointer)
             }
         }
+        return index
+    }
 
-        return pointers
+    private func pointerFormatConsistencyFailure(
+        in segments: [ParsedDyldChainedFixupsSegment]
+    ) -> DyldChainedFixupsReadError? {
+        guard let first = segments.first else { return nil }
+        let expectedFormat = first.info.layout.pointer_format
+        for segment in segments.dropFirst() {
+            guard segment.info.layout.pointer_format != expectedFormat else {
+                continue
+            }
+            return .init(
+                location: .segment(index: segment.info.segmentIndex),
+                reason: .invalidValue(
+                    field: "pointer_format consistency",
+                    value: UInt64(segment.info.layout.pointer_format)
+                )
+            )
+        }
+        return nil
+    }
+
+    private func pointerReport(
+        for startsInSegment: ParsedDyldChainedFixupsSegment,
+        in machO: MachOFile
+    ) -> DyldChainedFixupPointerReport {
+        let segmentIndex = startsInSegment.info.segmentIndex
+        let location = DyldChainedFixupsReadError.Location.segment(index: segmentIndex)
+        do {
+            try validateSegmentCount(in: machO)
+        } catch let error as DyldChainedFixupsReadError {
+            return .init(pointers: [], failures: [error])
+        } catch {
+            return .init(
+                pointers: [],
+                failures: [.init(location: .segmentOffsets, reason: .arithmeticOverflow)]
+            )
+        }
+        guard let pointerFormat = startsInSegment.info.pointerFormat else {
+            return .init(
+                pointers: [],
+                failures: [
+                    .init(
+                        location: location,
+                        reason: .unsupportedFormat(
+                            value: UInt64(startsInSegment.info.layout.pointer_format)
+                        )
+                    )
+                ]
+            )
+        }
+        guard pointerFormat.is64Bit == machO.is64Bit else {
+            return .init(
+                pointers: [],
+                failures: [
+                    .init(
+                        location: location,
+                        reason: .invalidValue(
+                            field: "pointer_format bitness",
+                            value: UInt64(pointerFormat.rawValue)
+                        )
+                    )
+                ]
+            )
+        }
+        guard let segment = fileSegment(at: segmentIndex, in: machO) else {
+            return .init(
+                pointers: [],
+                failures: [
+                    .init(
+                        location: location,
+                        reason: .invalidIndex(
+                            index: segmentIndex,
+                            count: machOSegmentCount(in: machO)
+                        )
+                    )
+                ]
+            )
+        }
+        guard startsInSegment.info.layout.segment_offset == segment.virtualMemoryOffset else {
+            return .init(
+                pointers: [],
+                failures: [
+                    .init(
+                        location: location,
+                        reason: .invalidValue(
+                            field: "segment_offset",
+                            value: startsInSegment.info.layout.segment_offset
+                        )
+                    )
+                ]
+            )
+        }
+
+        let pageSize = UInt64(startsInSegment.info.layout.page_size)
+        guard [UInt64(0x1000), UInt64(0x4000)].contains(pageSize) else {
+            return .init(
+                pointers: [],
+                failures: [
+                    .init(
+                        location: location,
+                        reason: .invalidValue(field: "page_size", value: pageSize)
+                    )
+                ]
+            )
+        }
+
+        var report = DyldChainedFixupPointerReport(pointers: [], failures: [])
+        for (pageIndex, pageStart) in startsInSegment.pageStarts.enumerated() {
+            if pageStart == UInt16(DYLD_CHAINED_PTR_START_NONE) {
+                continue
+            }
+            switch chainStarts(
+                for: pageStart,
+                pageIndex: pageIndex,
+                pointerFormat: pointerFormat,
+                machOIs64Bit: machO.is64Bit,
+                pageSize: pageSize,
+                segment: startsInSegment
+            ) {
+            case let .success(chainStarts):
+                for chainStart in chainStarts {
+                    let chainReport = walkChain(
+                        from: UInt64(chainStart),
+                        pageIndex: pageIndex,
+                        pageSize: pageSize,
+                        pointerFormat: pointerFormat,
+                        segment: segment,
+                        segmentIndex: segmentIndex,
+                        machO: machO
+                    )
+                    report.pointers.append(contentsOf: chainReport.pointers)
+                    report.failures.append(contentsOf: chainReport.failures)
+                }
+            case let .failure(error):
+                report.failures.append(error)
+            }
+        }
+        return report
+    }
+
+    private func chainStarts(
+        for pageStart: UInt16,
+        pageIndex: Int,
+        pointerFormat: DyldChainedFixupPointerFormat,
+        machOIs64Bit: Bool,
+        pageSize: UInt64,
+        segment: ParsedDyldChainedFixupsSegment
+    ) -> Result<[UInt16], DyldChainedFixupsReadError> {
+        guard pageStart & UInt16(DYLD_CHAINED_PTR_START_MULTI) != 0 else {
+            return .success([pageStart])
+        }
+
+        let location = DyldChainedFixupsReadError.Location.multiStart(
+            segment: segment.info.segmentIndex,
+            page: pageIndex
+        )
+        guard !machOIs64Bit, !pointerFormat.is64Bit else {
+            return .failure(
+                .init(
+                    location: location,
+                    reason: .invalidValue(
+                        field: "multiStartPointerFormat",
+                        value: UInt64(pointerFormat.rawValue)
+                    )
+                )
+            )
+        }
+        var index = Int(pageStart & ~UInt16(DYLD_CHAINED_PTR_START_MULTI))
+        guard index >= segment.pageStarts.count,
+              segment.allStartEntries.indices.contains(index) else {
+            return .failure(
+                .init(
+                    location: location,
+                    reason: .invalidIndex(
+                        index: index,
+                        count: segment.allStartEntries.count
+                    )
+                )
+            )
+        }
+
+        var starts: [UInt16] = []
+        var terminated = false
+        while segment.allStartEntries.indices.contains(index) {
+            let entry = segment.allStartEntries[index]
+            starts.append(entry & ~UInt16(DYLD_CHAINED_PTR_START_LAST))
+            if entry & UInt16(DYLD_CHAINED_PTR_START_LAST) != 0 {
+                terminated = true
+                break
+            }
+            let (nextIndex, overflow) = index.addingReportingOverflow(1)
+            guard !overflow else {
+                return .failure(.init(location: location, reason: .arithmeticOverflow))
+            }
+            index = nextIndex
+        }
+        guard terminated else {
+            return .failure(.init(location: location, reason: .unterminatedTable))
+        }
+        let pointerWidth = UInt64(pointerFormat.is64Bit ? 8 : 4)
+        var previous: UInt16?
+        for start in starts {
+            if let previous, start <= previous {
+                return .failure(
+                    .init(
+                        location: location,
+                        reason: .invalidValue(
+                            field: "multiStartOrder",
+                            value: UInt64(start)
+                        )
+                    )
+                )
+            }
+            let startOffset = UInt64(start)
+            guard startOffset <= pageSize,
+                  pointerWidth <= pageSize - startOffset else {
+                return .failure(
+                    .init(
+                        location: location,
+                        reason: .invalidRange(
+                            offset: startOffset,
+                            byteCount: pointerWidth,
+                            availableByteCount: Int(pageSize)
+                        )
+                    )
+                )
+            }
+            previous = start
+        }
+        return .success(starts)
     }
 
     private func walkChain(
-        offset: Int,
-        pagesFileSlice: FileSlice,
-        of startsInSegment: DyldChainedStartsInSegment,
-        pointers: inout [DyldChainedFixupPointer]
-    ) {
-        guard let pointerFormat = startsInSegment.pointerFormat else {
-            return
-        }
-        var offset = offset
-
-        let stride = pointerFormat.stride
-        var stop = false
-        var chainEnd = false
-
-        while !stop && !chainEnd {
-            guard let fixupInfo = _fixupInfo(
-                at: offset,
-                in: pagesFileSlice,
-                pointerFormat: pointerFormat
-            ) else {
-                stop = true
-                continue
-            }
-
-            let pointerOffset = numericCast(startsInSegment.segment_offset) + offset
-
-            pointers.append(
-                DyldChainedFixupPointer(
-                    offset: pointerOffset,
-                    fixupInfo: fixupInfo
-                )
-            )
-
-            if fixupInfo.next == 0 {
-                chainEnd = true
-            } else {
-                offset += stride * fixupInfo.next
-            }
-        }
-    }
-}
-
-extension MachOFile.DyldChainedFixups {
-    public func pointer(for offset: UInt64, in machO: MachOFile) -> DyldChainedFixupPointer? {
-        guard let startsInImage = startsInImage else { return nil }
-        guard let startsInSegment = startsInSegments(of: startsInImage)
-            .first(where: {
-                let segmentSize = UInt64($0.page_size) * UInt64($0.page_count)
-                return $0.segment_offset <= offset && offset < $0.segment_offset + segmentSize
-            }) else {
-            return nil
-        }
-
-        let pages = pages(of: startsInSegment)
-
-        let pagesFileSlice = try! machO.fileHandle.fileSlice(
-            offset: machO.headerStartOffset + numericCast(startsInSegment.segment_offset),
-            length: pages.count * numericCast(startsInSegment.page_size)
+        from startOffsetInPage: UInt64,
+        pageIndex: Int,
+        pageSize: UInt64,
+        pointerFormat: DyldChainedFixupPointerFormat,
+        segment: DyldChainedFixupFileSegment,
+        segmentIndex: Int,
+        machO: MachOFile
+    ) -> DyldChainedFixupPointerReport {
+        let location = DyldChainedFixupsReadError.Location.chain(
+            segment: segmentIndex,
+            page: pageIndex
         )
-
-        for (index, page) in pages.enumerated() {
-            var offsetInPage = page.offset
-
-            if page.isNone { continue }
-            if page.isMulti {
-                var overflowIndex = Int(offsetInPage & ~UInt16(DYLD_CHAINED_PTR_START_MULTI))
-                var chainEnd = false
-                while !chainEnd {
-                    chainEnd = pages[overflowIndex].offset & UInt16(DYLD_CHAINED_PTR_START_LAST) != 0
-                    offsetInPage = pages[overflowIndex].offset & ~UInt16(DYLD_CHAINED_PTR_START_LAST)
-                    let pageContentStart: Int = index * numericCast(startsInSegment.page_size)
-                    let chainOffset = pageContentStart + numericCast(offsetInPage)
-
-                    if let pointer = walkChainAndFindPointer(
-                        for: offset,
-                        chainOffset: chainOffset,
-                        pagesFileSlice: pagesFileSlice,
-                        of: startsInSegment
-                    ) {
-                        return pointer
-                    }
-
-                    overflowIndex += 1
-                }
-            } else {
-                let pageContentStart: Int = index * numericCast(startsInSegment.page_size)
-                let chainOffset = pageContentStart + numericCast(offsetInPage)
-
-                if let pointer = walkChainAndFindPointer(
-                    for: offset,
-                    chainOffset: chainOffset,
-                    pagesFileSlice: pagesFileSlice,
-                    of: startsInSegment
-                ) {
-                    return pointer
-                }
-
-            }
+        let fileView = DyldChainedFixupsByteView(
+            bytes: .init(start: machO.fileHandle.ptr, count: machO.fileHandle.size)
+        )
+        guard let headerStartOffset = UInt64(exactly: machO.headerStartOffset),
+              let pageIndex = UInt64(exactly: pageIndex) else {
+            return .init(
+                pointers: [],
+                failures: [.init(location: location, reason: .arithmeticOverflow)]
+            )
         }
 
-        return nil
-    }
-    private func walkChainAndFindPointer(
-        for targetOffset: UInt64,
-        chainOffset: Int,
-        pagesFileSlice: FileSlice,
-        of startsInSegment: DyldChainedStartsInSegment
-    ) -> DyldChainedFixupPointer? {
-        guard let pointerFormat = startsInSegment.pointerFormat else {
-            return nil
-        }
-        var chainOffset = chainOffset
-
-        let stride = pointerFormat.stride
-        var stop = false
-        var chainEnd = false
-
-        while !stop && !chainEnd {
-            guard let fixupInfo = _fixupInfo(
-                at: chainOffset,
-                in: pagesFileSlice,
-                pointerFormat: pointerFormat
-            ) else {
-                stop = true
-                continue
-            }
-
-            let pointerOffset = numericCast(startsInSegment.segment_offset) + chainOffset
-
-            if pointerOffset == targetOffset {
-                return DyldChainedFixupPointer(
-                    offset: pointerOffset,
-                    fixupInfo: fixupInfo
+        var pointers: [DyldChainedFixupPointer] = []
+        do {
+            let pageOffset = try fileView.checkedMultiply(
+                pageIndex,
+                pageSize,
+                location: location
+            )
+            var offsetInPage = startOffsetInPage
+            while true {
+                let pointerWidth = UInt64(pointerFormat.is64Bit ? 8 : 4)
+                guard offsetInPage <= pageSize,
+                      pointerWidth <= pageSize - offsetInPage else {
+                    throw DyldChainedFixupsReadError(
+                        location: location,
+                        reason: .invalidRange(
+                            offset: offsetInPage,
+                            byteCount: pointerWidth,
+                            availableByteCount: Int(exactly: pageSize) ?? 0
+                        )
+                    )
+                }
+                let segmentRelativeOffset = try fileView.checkedAdd(
+                    pageOffset,
+                    offsetInPage,
+                    location: location
+                )
+                guard segmentRelativeOffset <= segment.fileSize,
+                      pointerWidth <= segment.fileSize - segmentRelativeOffset else {
+                    throw DyldChainedFixupsReadError(
+                        location: location,
+                        reason: .invalidRange(
+                            offset: segmentRelativeOffset,
+                            byteCount: pointerWidth,
+                            availableByteCount: Int(exactly: segment.fileSize) ?? 0
+                        )
+                    )
+                }
+                let pointerFileOffset = try fileView.checkedAdd(
+                    segment.fileOffset,
+                    segmentRelativeOffset,
+                    location: location
+                )
+                let absoluteFileOffset = try fileView.checkedAdd(
+                    headerStartOffset,
+                    pointerFileOffset,
+                    location: location
+                )
+                let fixupInfo: DyldChainedFixupPointerInfo?
+                if pointerFormat.is64Bit {
+                    let rawValue: UInt64 = try fileView.loadUnaligned(
+                        at: absoluteFileOffset,
+                        location: location
+                    )
+                    fixupInfo = _fixupInfo(rawValue: rawValue, pointerFormat: pointerFormat)
+                } else {
+                    let rawValue: UInt32 = try fileView.loadUnaligned(
+                        at: absoluteFileOffset,
+                        location: location
+                    )
+                    fixupInfo = _fixupInfo(rawValue: rawValue, pointerFormat: pointerFormat)
+                }
+                guard let fixupInfo else {
+                    throw DyldChainedFixupsReadError(
+                        location: location,
+                        reason: .unsupportedFormat(value: UInt64(pointerFormat.rawValue))
+                    )
+                }
+                guard let pointerOffset = Int(exactly: pointerFileOffset) else {
+                    throw DyldChainedFixupsReadError(
+                        location: location,
+                        reason: .arithmeticOverflow
+                    )
+                }
+                pointers.append(
+                    .init(offset: pointerOffset, fixupInfo: fixupInfo)
+                )
+                guard fixupInfo.next != 0 else {
+                    return .init(pointers: pointers, failures: [])
+                }
+                let delta = try fileView.checkedMultiply(
+                    UInt64(pointerFormat.stride),
+                    UInt64(fixupInfo.next),
+                    location: location
+                )
+                offsetInPage = try fileView.checkedAdd(
+                    offsetInPage,
+                    delta,
+                    location: location
                 )
             }
+        } catch let error as DyldChainedFixupsReadError {
+            return .init(pointers: pointers, failures: [error])
+        } catch {
+            return .init(
+                pointers: pointers,
+                failures: [.init(location: location, reason: .arithmeticOverflow)]
+            )
+        }
+    }
 
-            if fixupInfo.next == 0 {
-                chainEnd = true
-            } else {
-                chainOffset += stride * fixupInfo.next
+    private func fileSegment(
+        at index: Int,
+        in machO: MachOFile
+    ) -> DyldChainedFixupFileSegment? {
+        if machO.is64Bit {
+            let segments = Array(machO.segments64)
+            guard segments.indices.contains(index),
+                  let preferredLoadAddress = machO.loadCommands.text64?.layout.vmaddr else {
+                return nil
             }
+            let segment = segments[index].layout
+            guard segment.vmaddr >= preferredLoadAddress else { return nil }
+            return .init(
+                fileOffset: segment.fileoff,
+                fileSize: segment.filesize,
+                virtualMemoryOffset: segment.vmaddr - preferredLoadAddress
+            )
         }
 
-        return nil
+        let segments = Array(machO.segments32)
+        guard segments.indices.contains(index),
+              let preferredLoadAddress = machO.loadCommands.text?.layout.vmaddr else {
+            return nil
+        }
+        let segment = segments[index].layout
+        guard segment.vmaddr >= preferredLoadAddress else { return nil }
+        return .init(
+            fileOffset: UInt64(segment.fileoff),
+            fileSize: UInt64(segment.filesize),
+            virtualMemoryOffset: UInt64(segment.vmaddr - preferredLoadAddress)
+        )
     }
-}
 
-extension MachOFile.DyldChainedFixups {
-    @inline(__always)
+    private func validateSegmentCount(in machO: MachOFile) throws {
+        let starts = try parser.startsInImage()
+        guard let fixupSegmentCount = Int(exactly: starts.layout.seg_count) else {
+            throw invalidSegmentCount(starts.layout.seg_count)
+        }
+        if machO.is64Bit {
+            let segments = Array(machO.segments64)
+            guard let linkeditIndex = segments.firstIndex(
+                where: { $0.segmentName == "__LINKEDIT" }
+            ) else {
+                throw invalidSegmentCount(starts.layout.seg_count)
+            }
+            try validateSegmentCount(
+                fixupSegmentCount,
+                linkeditIndex: linkeditIndex,
+                virtualMemorySizes: segments.map(\.layout.vmsize),
+                encodedValue: starts.layout.seg_count
+            )
+        } else {
+            let segments = Array(machO.segments32)
+            guard let linkeditIndex = segments.firstIndex(
+                where: { $0.segmentName == "__LINKEDIT" }
+            ) else {
+                throw invalidSegmentCount(starts.layout.seg_count)
+            }
+            try validateSegmentCount(
+                fixupSegmentCount,
+                linkeditIndex: linkeditIndex,
+                virtualMemorySizes: segments.map { UInt64($0.layout.vmsize) },
+                encodedValue: starts.layout.seg_count
+            )
+        }
+    }
+
+    private func validateSegmentCount(
+        _ fixupSegmentCount: Int,
+        linkeditIndex: Int,
+        virtualMemorySizes: [UInt64],
+        encodedValue: UInt32
+    ) throws {
+        let expectedSegmentCount = linkeditIndex + 1
+        guard fixupSegmentCount <= expectedSegmentCount else {
+            throw invalidSegmentCount(encodedValue)
+        }
+        let extraSegmentCount = expectedSegmentCount - fixupSegmentCount
+        for extraIndex in 0 ..< extraSegmentCount {
+            let segmentIndex = linkeditIndex - (extraIndex + 1)
+            guard virtualMemorySizes.indices.contains(segmentIndex),
+                  virtualMemorySizes[segmentIndex] == 0 else {
+                throw invalidSegmentCount(encodedValue)
+            }
+        }
+    }
+
+    private func invalidSegmentCount(
+        _ encodedValue: UInt32
+    ) -> DyldChainedFixupsReadError {
+        .init(
+            location: .segmentOffsets,
+            reason: .invalidValue(
+                field: "seg_count",
+                value: UInt64(encodedValue)
+            )
+        )
+    }
+
+    private func machOSegmentCount(in machO: MachOFile) -> Int {
+        machO.is64Bit
+            ? Array(machO.segments64).count
+            : Array(machO.segments32).count
+    }
+
     private func _fixupInfo(
-        at offset: Int,
-        in pagesFileSlice: FileSlice,
+        rawValue: UInt64,
         pointerFormat: DyldChainedFixupPointerFormat
     ) -> DyldChainedFixupPointerInfo? {
-        var fixupInfo: DyldChainedFixupPointerInfo?
+        .init(rawValue: rawValue, pointerFormat: pointerFormat)
+    }
 
-        if pointerFormat.is64Bit {
-//            faster than below code
-//            let rawValue = data.advanced(by: offset).withUnsafeBytes {
-//                $0.load(as: UInt64.self)
-//            }
-            guard let rawValue: UInt64 = try? pagesFileSlice.read(
-                offset: offset,
-                as: UInt64.self
-            ) else {
-                return nil
-            }
-
-            switch pointerFormat {
-            case .arm64e, .arm64e_kernel, .arm64e_userland, .arm64e_firmware:
-                let content = DyldChainedFixupPointerInfo.ARM64E(rawValue: rawValue)
-                switch pointerFormat {
-                case .arm64e:
-                    fixupInfo = .arm64e(content)
-                case .arm64e_kernel:
-                    fixupInfo = .arm64e_kernel(content)
-                case .arm64e_userland:
-                    fixupInfo = .arm64e_userland(content)
-                case .arm64e_firmware:
-                    fixupInfo = .arm64e_firmware(content)
-                default: break
-                }
-
-            case .arm64e_userland24:
-                let content = DyldChainedFixupPointerInfo.ARM64EUserland24(rawValue: rawValue)
-                fixupInfo = .arm64e_userland24(content)
-
-            case ._64, ._64_offset:
-                let content = DyldChainedFixupPointerInfo.General64(rawValue: rawValue)
-                switch pointerFormat {
-                case ._64: fixupInfo = ._64(content)
-                case ._64_offset: fixupInfo = ._64_offset(content)
-                default: break
-                }
-
-            case ._64_kernel_cache, .x86_64_kernel_cache:
-                let content = DyldChainedFixupPointerInfo.General64Cache(rawValue: rawValue)
-                switch pointerFormat {
-                case ._64_kernel_cache:
-                    fixupInfo = ._64_kernel_cache(content)
-                case .x86_64_kernel_cache:
-                    fixupInfo = .x86_64_kernel_cache(content)
-                default: break
-                }
-
-            case .arm64e_shared_cache:
-                let content = DyldChainedFixupPointerInfo.ARM64ESharedCache(rawValue: rawValue)
-                fixupInfo = .arm64e_shared_cache(content)
-
-            default:
-                break
-            }
-        } else {
-            guard let rawValue: UInt32 = try? pagesFileSlice.read(
-                offset: offset
-            ) else {
-                return nil
-            }
-
-            switch pointerFormat {
-            case ._32:
-                let content = DyldChainedFixupPointerInfo.General32(rawValue: rawValue)
-                fixupInfo = ._32(content)
-            case ._32_cache:
-                let content = DyldChainedFixupPointerInfo.General32Cache(rawValue: rawValue)
-                fixupInfo = ._32_cache(content)
-            case ._32_firmware:
-                let content = DyldChainedFixupPointerInfo.General32Firmware(rawValue: rawValue)
-                fixupInfo = ._32_firmware(content)
-            default:
-                break
-            }
-        }
-
-        return fixupInfo
+    private func _fixupInfo(
+        rawValue: UInt32,
+        pointerFormat: DyldChainedFixupPointerFormat
+    ) -> DyldChainedFixupPointerInfo? {
+        .init(rawValue: rawValue, pointerFormat: pointerFormat)
     }
 }

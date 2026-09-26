@@ -14,6 +14,48 @@ public struct DyldChainedFixupPointer: Sendable {
 }
 
 extension DyldChainedFixupPointer {
+    @inline(__always)
+    static func walkChain(
+        startOffset: Int,
+        pointerOffsetBias: Int,
+        pointerFormat: DyldChainedFixupPointerFormat,
+        pointers: inout [Self],
+        fixupInfoAtOffset: (Int) -> DyldChainedFixupPointerInfo?
+    ) -> Bool {
+        var offset = startOffset
+
+        while true {
+            guard let fixupInfo = fixupInfoAtOffset(offset) else {
+                return false
+            }
+
+            let (pointerOffset, pointerOffsetOverflow) = pointerOffsetBias
+                .addingReportingOverflow(offset)
+            guard !pointerOffsetOverflow else {
+                return false
+            }
+            pointers.append(
+                .init(offset: pointerOffset, fixupInfo: fixupInfo)
+            )
+
+            guard fixupInfo.next != 0 else {
+                return true
+            }
+            let (distance, distanceOverflow) = pointerFormat.stride
+                .multipliedReportingOverflow(by: fixupInfo.next)
+            let (nextOffset, nextOffsetOverflow) = offset
+                .addingReportingOverflow(distance)
+            guard !distanceOverflow,
+                  !nextOffsetOverflow,
+                  nextOffset > offset else {
+                return false
+            }
+            offset = nextOffset
+        }
+    }
+}
+
+extension DyldChainedFixupPointer {
     public func rebaseTargetRuntimeOffset(
         for cache: DyldCache, // dummy
         preferedLoadAddress: UInt64
@@ -80,6 +122,7 @@ extension DyldChainedFixupPointer {
             } else {
                 var unpacked = rebase.unpackedTarget
                 if [.arm64e, .arm64e_firmware].contains(format) {
+                    guard unpacked >= preferedLoadAddress else { return nil }
                     unpacked -= preferedLoadAddress
                 }
                 return unpacked
@@ -88,6 +131,7 @@ extension DyldChainedFixupPointer {
         case ._64_offset:
             var unpacked = rebase.unpackedTarget
             if format == ._64 {
+                guard unpacked >= preferedLoadAddress else { return nil }
                 unpacked -= preferedLoadAddress
             }
             return unpacked
@@ -95,9 +139,13 @@ extension DyldChainedFixupPointer {
         case .x86_64_kernel_cache:
             return numericCast(rebase.target)
         case ._32:
-            return numericCast(rebase.target) - preferedLoadAddress
+            let target = UInt64(rebase.target)
+            guard target >= preferedLoadAddress else { return nil }
+            return target - preferedLoadAddress
         case ._32_firmware:
-            return numericCast(rebase.target) - preferedLoadAddress
+            let target = UInt64(rebase.target)
+            guard target >= preferedLoadAddress else { return nil }
+            return target - preferedLoadAddress
         case .arm64e_shared_cache:
             return numericCast(rebase.target)
         case .arm64e_segmented(let info): // FIXME: Check when new dylds are released.
@@ -115,25 +163,33 @@ extension DyldChainedFixupPointer {
                 targetSegOffset = rebase.layout.targetSegOffset
                 targetSegIndex = rebase.layout.targetSegIndex
             }
-            let segment = machO.segments[numericCast(targetSegIndex)]
-            return numericCast(segment.virtualMemoryAddress) - preferedLoadAddress + numericCast(targetSegOffset)
+            let segmentIndex = Int(targetSegIndex)
+            let virtualMemoryAddress: UInt64
+            if machO.is64Bit {
+                let segments = Array(machO.segments64)
+                guard segments.indices.contains(segmentIndex) else { return nil }
+                virtualMemoryAddress = segments[segmentIndex].layout.vmaddr
+            } else {
+                let segments = Array(machO.segments32)
+                guard segments.indices.contains(segmentIndex) else { return nil }
+                virtualMemoryAddress = UInt64(segments[segmentIndex].layout.vmaddr)
+            }
+            guard virtualMemoryAddress >= preferedLoadAddress else { return nil }
+            let baseOffset = virtualMemoryAddress - preferedLoadAddress
+            let (result, overflow) = baseOffset.addingReportingOverflow(UInt64(targetSegOffset))
+            return overflow ? nil : result
         default:
             return nil
         }
     }
 
     public func rebaseTargetRuntimeOffset(for machO: MachOFile) -> UInt64? {
-        let preferedLoadAddress: UInt64
-        if let text64 = machO.loadCommands.text64 {
-            preferedLoadAddress = text64.vmaddr
-        } else if let text = machO.loadCommands.text {
-            preferedLoadAddress = numericCast(text.vmaddr)
-        } else {
+        guard let preferredLoadAddress = machO.preferredLoadAddress else {
             return nil
         }
         return rebaseTargetRuntimeOffset(
             for: machO,
-            preferedLoadAddress: preferedLoadAddress
+            preferedLoadAddress: preferredLoadAddress
         )
     }
 }
