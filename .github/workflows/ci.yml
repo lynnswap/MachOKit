@@ -35,7 +35,7 @@ jobs:
 
   linux-build:
     name: Linux Test
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container: swift:6.3.3-jammy@sha256:0c9411e2f70154a16f3e5660299d618a3642a445b446efe2aa637a4d01a83d54
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

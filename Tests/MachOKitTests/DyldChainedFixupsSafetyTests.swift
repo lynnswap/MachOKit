@@ -684,16 +684,19 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
             symbol.n_type = UInt8(flags)
             symbol.n_sect = 1
             symbol.n_value = value
-            data.write(symbol, at: 0x2100 + index * MemoryLayout<nlist_64>.size)
+            let offset = 0x2100 + index * MemoryLayout<nlist_64>.size
+            withUnsafeBytes(of: &symbol) { bytes in
+                data.replaceSubrange(offset..<(offset + bytes.count), with: bytes)
+            }
         }
         data.replaceSubrange(0x2180..<0x218e, with: Data("\0local\0global\0".utf8))
         func check<M: MachORepresentable>(_ machO: M) {
-            XCTAssertEqual(machO.closestSymbol(at: 0x200)?.name, "local")
-            XCTAssertEqual(machO.closestSymbol(at: 0x200, isGlobalOnly: true)?.name, "global")
-            XCTAssertNil(machO.closestSymbol(at: 0x200, inSection: 2))
-            XCTAssertEqual(machO.closestSymbols(at: 0x200).map(\.name), ["local"])
-            XCTAssertEqual(machO.closestSymbols(at: 0x200, isGlobalOnly: true).map(\.name), ["global"])
-            XCTAssertTrue(machO.closestSymbols(at: 0x200, inSection: 2).isEmpty)
+            XCTAssertEqual(machO.closestSymbol(at: 0x1_0000_0200)?.name, "local")
+            XCTAssertEqual(machO.closestSymbol(at: 0x1_0000_0200, isGlobalOnly: true)?.name, "global")
+            XCTAssertNil(machO.closestSymbol(at: 0x1_0000_0200, inSection: 2))
+            XCTAssertEqual(machO.closestSymbols(at: 0x1_0000_0200).map(\.name), ["local"])
+            XCTAssertEqual(machO.closestSymbols(at: 0x1_0000_0200, isGlobalOnly: true).map(\.name), ["global"])
+            XCTAssertTrue(machO.closestSymbols(at: 0x1_0000_0200, inSection: 2).isEmpty)
         }
         try withMachOFile(data: data, check)
     }
