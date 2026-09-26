@@ -1010,17 +1010,20 @@ extension MachOFile {
         let fileView = DyldChainedFixupsByteView(
             bytes: .init(start: fileHandle.ptr, count: fileHandle.size)
         )
+        // Explicit storage types prevent try? from inferring an Optional layout.
         if pointer.fixupInfo.pointerFormat.is64Bit {
-            guard let value: UInt64 = try? fileView.loadUnaligned(
+            guard let value = try? fileView.loadUnaligned(
                 at: absoluteOffset,
+                as: UInt64.self,
                 location: .resolver
             ) else {
                 return nil
             }
             if value == 0 { return nil }
         } else {
-            guard let value: UInt32 = try? fileView.loadUnaligned(
+            guard let value = try? fileView.loadUnaligned(
                 at: absoluteOffset,
+                as: UInt32.self,
                 location: .resolver
             ) else {
                 return nil

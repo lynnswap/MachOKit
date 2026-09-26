@@ -569,8 +569,9 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
             segmentRelativeOffset: 0x10,
             entries: [0]
         )
-        var data = makeMachO(fixupsBlob: blob)
+        var data = makeMachO(fixupsBlob: blob, preferredLoadAddress: 0)
         data.write(UInt64(0x0020_0000_0007_6758), at: 0x1000)
+        data.write(UInt8(1), at: 0x1008)
         data.write(UInt64(0x0000_0000_0007_6780), at: 0x1010)
         try withMachOFile(data: data) { machO in
             try machO.validateChainedFixups()
@@ -579,6 +580,30 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
             XCTAssertEqual(machO.resolveOptionalRebase(at: 0x1010), 0x76780)
             machO.invalidateChainedFixupsCache()
             XCTAssertEqual(machO.resolveOptionalRebase(at: 0x1000), 0x76758)
+        }
+    }
+
+    func testOptionalRebaseReadsOnlyThe32BitPointer() throws {
+        let blob = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            pointerFormat: UInt16(DYLD_CHAINED_PTR_32),
+            entries: [0]
+        )
+        var data = makeMachO32(fixupsBlob: blob)
+        // Keep the preferred load address inside the 26-bit target field.
+        data.write(UInt32(0), at: 28 + 24)
+        data.write(UInt32(0x4000), at: 28 + 56 + 24)
+        data.write(UInt32(0x8000), at: 28 + 56 * 2 + 24)
+        data.write(UInt32(0x1234), at: 0x1000)
+        data.write(UInt8(1), at: 0x1004)
+        try withMachOFile(data: data) { machO in
+            try machO.validateChainedFixups()
+            XCTAssertEqual(machO.resolveOptionalRebase(at: 0x1000), 0x1234)
+        }
+        data.write(UInt32(0), at: 0x1000)
+        try withMachOFile(data: data) { machO in
+            XCTAssertNil(machO.resolveOptionalRebase(at: 0x1000))
         }
     }
 
@@ -745,9 +770,9 @@ private extension DyldChainedFixupsSafetyTests {
         fixupsBlob: Data,
         dataSegmentFileOffset: UInt64 = 0x1000,
         dataSegmentFileSize: UInt64 = 0x1000,
-        dataSegmentVMOffset: UInt64 = 0x4000
+        dataSegmentVMOffset: UInt64 = 0x4000,
+        preferredLoadAddress: UInt64 = 0x1_0000_0000
     ) -> Data {
-        let preferredLoadAddress: UInt64 = 0x1_0000_0000
         let linkeditFileOffset: UInt64 = 0x2000
         let fileSize = 0x3000
         var data = Data(count: fileSize)

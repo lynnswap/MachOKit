@@ -110,6 +110,10 @@ extension CPUType: CustomStringConvertible {
 }
 
 extension CPUType {
+    /// CPU_TYPE_X86, the historical spelling of CPU_TYPE_I386.
+    @available(*, deprecated, renamed: "i386")
+    public static var x86: Self { .i386 }
+
     public var is64Bit: Bool {
         guard self != .any else { return false }
         return rawValue & CPU_ARCH_ABI64 != 0
