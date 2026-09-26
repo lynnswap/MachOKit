@@ -607,6 +607,68 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
         }
     }
 
+    func testLazyChainTraversesRebasesAndValidatesOnlyBindOrdinals() throws {
+        let blob = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            segmentOffset: 0x1000,
+            entries: [0]
+        )
+        var data = makeMachO(fixupsBlob: blob, dataSegmentVMOffset: 0x1000)
+        data.write(UInt64(2) << 51 | 0x1234, at: 0x1000)
+        data.write(UInt64(1) << 63, at: 0x1008)
+        data.write(UInt8(1), at: 0x1010)
+        var layout = LazyLoadDylib.Layout()
+        layout.pointerFormat = UInt16(DYLD_CHAINED_PTR_64_OFFSET)
+        layout.chainStartImageOffset = 0x1000
+        layout.flagImageOffset = 0x1100
+        layout.symbolsCount = 1
+        let lazy = LazyLoadDylib(layout: layout, dataOffset: 0x2000, dataSize: 28)
+        for invalidOrdinal in [false, true] {
+            if invalidOrdinal { data.write(UInt64(1) << 63 | 1, at: 0x1008) }
+            try withMachOFile(data: data) { machO in
+                let pointers = lazy.fixups(in: machO)
+                if invalidOrdinal {
+                    XCTAssertNil(pointers)
+                } else {
+                    XCTAssertEqual(pointers?.map(\.offset), [0x1000, 0x1008])
+                    XCTAssertEqual(pointers?.last?.fixupInfo.bind?.ordinal, 0)
+                }
+            }
+            data.withUnsafeBytes { bytes in
+                let image = MachOImage(ptr: bytes.baseAddress!.assumingMemoryBound(to: mach_header.self))
+                let pointers = lazy.fixups(in: image)
+                if invalidOrdinal {
+                    XCTAssertNil(pointers)
+                } else {
+                    XCTAssertEqual(pointers?.map(\.offset), [0x1000, 0x1008])
+                    XCTAssertEqual(pointers?.last?.fixupInfo.bind?.ordinal, 0)
+                }
+            }
+        }
+    }
+
+    func testSegmentRangesPreserveUnsignedKernelAddresses() {
+        var layout = segment_command_64()
+        layout.vmaddr = 0xfffffff007004000
+        layout.vmsize = 0x4000
+        layout.fileoff = 0x8000000000000000
+        layout.filesize = 0x2000
+        var segment = SegmentCommand64(layout, offset: 0)
+        func check(_ segment: any SegmentCommandProtocol) {
+            XCTAssertEqual(segment.virtualMemoryRange, 0xfffffff007004000..<0xfffffff007008000)
+            XCTAssertEqual(segment.fileBackedVirtualMemoryRange, 0xfffffff007004000..<0xfffffff007006000)
+            XCTAssertEqual(segment.fileRange, 0x8000000000000000..<0x8000000000002000)
+            XCTAssertTrue(segment.contains(unslidAddress: 0xfffffff007007000))
+        }
+        check(segment)
+        segment.layout.vmaddr = UInt64.max - 1
+        segment.layout.fileoff = UInt64.max - 1
+        XCTAssertNil(segment.virtualMemoryRange)
+        XCTAssertNil(segment.fileBackedVirtualMemoryRange)
+        XCTAssertNil(segment.fileRange)
+    }
+
     func testPointerIndexRejectsDuplicateFileOffsetsAtInsertionOwner() {
         let pointer = DyldChainedFixupPointer(
             offset: 0x1000,

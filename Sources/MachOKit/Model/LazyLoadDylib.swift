@@ -99,7 +99,7 @@ extension LazyLoadDylib {
             at: numericCast(flagImageOffset),
             length: MemoryLayout<UInt32>.size,
             in: machO
-        ), let value: UInt32 = try? file.read(offset: offset) else {
+        ), let value = try? file.read(offset: offset, as: UInt32.self) else {
             return nil
         }
         return machO.isSwapped ? value.byteSwapped : value
@@ -401,7 +401,7 @@ extension LazyLoadDylib {
         )
         guard reachedEnd,
               pointers.allSatisfy({
-                  guard let bind = $0.fixupInfo.bind else { return false }
+                  guard let bind = $0.fixupInfo.bind else { return true }
                   return (0..<symbolsCount).contains(bind.ordinal)
               }) else { return nil }
         return pointers
@@ -425,13 +425,13 @@ extension LazyLoadDylib {
         }
 
         if pointerFormat.is64Bit {
-            guard var rawValue: UInt64 = try? file.read(offset: offset) else {
+            guard var rawValue = try? file.read(offset: offset, as: UInt64.self) else {
                 return nil
             }
             if machO.isSwapped { rawValue = rawValue.byteSwapped }
             return .init(rawValue: rawValue, pointerFormat: pointerFormat)
         } else {
-            guard var rawValue: UInt32 = try? file.read(offset: offset) else {
+            guard var rawValue = try? file.read(offset: offset, as: UInt32.self) else {
                 return nil
             }
             if machO.isSwapped { rawValue = rawValue.byteSwapped }

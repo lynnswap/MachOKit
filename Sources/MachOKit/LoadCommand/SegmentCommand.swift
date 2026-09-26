@@ -20,6 +20,9 @@ public protocol SegmentCommandProtocol: LoadCommandWrapper {
     var initialProtection: VMProtection { get }
     var numberOfSections: Int { get }
     var flags: SegmentCommandFlags { get }
+    var virtualMemoryRange: Range<UInt64>? { get }
+    var fileBackedVirtualMemoryRange: Range<UInt64>? { get }
+    var fileRange: Range<UInt64>? { get }
 
     func startPtr(vmaddrSlide: Int) -> UnsafeRawPointer?
     func endPtr(vmaddrSlide: Int) -> UnsafeRawPointer?
@@ -74,6 +77,39 @@ extension SegmentCommandProtocol {
         let (end, overflow) = start.addingReportingOverflow(size)
         guard !overflow else { return nil }
         return start..<end
+    }
+}
+
+private func segmentRange(start: UInt64, size: UInt64) -> Range<UInt64>? {
+    let (end, overflow) = start.addingReportingOverflow(size)
+    return overflow ? nil : start..<end
+}
+
+extension SegmentCommand {
+    public var virtualMemoryRange: Range<UInt64>? {
+        segmentRange(start: UInt64(layout.vmaddr), size: UInt64(layout.vmsize))
+    }
+
+    public var fileBackedVirtualMemoryRange: Range<UInt64>? {
+        segmentRange(start: UInt64(layout.vmaddr), size: UInt64(layout.filesize))
+    }
+
+    public var fileRange: Range<UInt64>? {
+        segmentRange(start: UInt64(layout.fileoff), size: UInt64(layout.filesize))
+    }
+}
+
+extension SegmentCommand64 {
+    public var virtualMemoryRange: Range<UInt64>? {
+        segmentRange(start: layout.vmaddr, size: layout.vmsize)
+    }
+
+    public var fileBackedVirtualMemoryRange: Range<UInt64>? {
+        segmentRange(start: layout.vmaddr, size: layout.filesize)
+    }
+
+    public var fileRange: Range<UInt64>? {
+        segmentRange(start: layout.fileoff, size: layout.filesize)
     }
 }
 
