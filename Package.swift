@@ -45,7 +45,11 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/apple/swift-crypto.git",
-            "1.0.0" ..< "4.0.0"
+            "1.0.0" ..< "5.0.0"
+        ),
+        .package(
+            url: "https://github.com/apple/swift-asn1.git",
+            from: "1.2.0"
         ),
     ],
     targets: [
@@ -58,6 +62,11 @@ let package = Package(
                 .product(
                     name: "Crypto",
                     package: "swift-crypto",
+                    condition: .when(platforms: linuxPlatforms)
+                ),
+                .product(
+                    name: "SwiftASN1",
+                    package: "swift-asn1",
                     condition: .when(platforms: linuxPlatforms)
                 )
             ],
