@@ -392,21 +392,158 @@ extension MachORepresentable {
     }
 }
 
+// Custom conformers keep the collection-based defaults. The concrete readers
+// below can inspect raw symbol records without eagerly decoding every name.
 extension MachORepresentable {
-    public func closestSymbol(at offset: Int, inSection sectionNumber: Int = 0) -> Symbol? {
-        closestSymbol(at: offset, inSection: sectionNumber, isGlobalOnly: false)
+    public func closestSymbol( // swiftlint:disable:this cyclomatic_complexity
+        at offset: Int,
+        inSection sectionNumber: Int = 0,
+        isGlobalOnly: Bool = false
+    ) -> Symbol? {
+        let symbols = Array(self.symbols)
+        var bestSymbol: Symbol?
+
+        if let dysym = loadCommands.dysymtab {
+            // find closest match in globals
+            let globalStart = UInt64(dysym.iextdefsym)
+            let globalCount = UInt64(dysym.nextdefsym)
+            for i in symbols.indices where (globalStart ..< globalStart + globalCount).contains(UInt64(i)) {
+                let symbol = symbols[i]
+                let nlist = symbol.nlist
+                let symbolSectionNumber = symbol.nlist.sectionNumber
+
+                guard nlist.flags?.type == .sect,
+                      symbol.offset <= offset,
+                      sectionNumber == 0 || symbolSectionNumber == sectionNumber else {
+                    continue
+                }
+                if let bestSymbol,
+                   bestSymbol.offset >= symbol.offset {
+                    continue
+                }
+                bestSymbol = symbol
+            }
+            if isGlobalOnly { return bestSymbol }
+
+            // find closest match in locals
+            let localStart = UInt64(dysym.ilocalsym)
+            let localCount = UInt64(dysym.nlocalsym)
+            for i in symbols.indices where (localStart ..< localStart + localCount).contains(UInt64(i)) {
+                let symbol = symbols[i]
+                let nlist = symbol.nlist
+                let symbolSectionNumber = symbol.nlist.sectionNumber
+
+                guard nlist.flags?.type == .sect,
+                      nlist.flags?.stab == nil,
+                      symbol.offset <= offset,
+                      sectionNumber == 0 || symbolSectionNumber == sectionNumber else {
+                    continue
+                }
+                if let bestSymbol,
+                   bestSymbol.offset >= symbol.offset {
+                    continue
+                }
+                bestSymbol = symbol
+            }
+        } else {
+            // find closest match in locals
+            for symbol in symbols {
+                let nlist = symbol.nlist
+                let symbolSectionNumber = symbol.nlist.sectionNumber
+                guard nlist.flags?.type == .sect,
+                      nlist.flags?.stab == nil,
+                      symbol.offset <= offset,
+                      !isGlobalOnly || nlist.flags?.contains(.ext) ?? false,
+                      sectionNumber == 0 || symbolSectionNumber == sectionNumber else {
+                    continue
+                }
+                if let bestSymbol,
+                   bestSymbol.offset >= symbol.offset {
+                    continue
+                }
+                bestSymbol = symbol
+            }
+        }
+
+        return bestSymbol
     }
 
-    public func closestSymbol(at offset: Int, isGlobalOnly: Bool) -> Symbol? {
-        closestSymbol(at: offset, inSection: 0, isGlobalOnly: isGlobalOnly)
-    }
+    public func closestSymbols( // swiftlint:disable:this cyclomatic_complexity
+        at offset: Int,
+        inSection sectionNumber: Int = 0,
+        isGlobalOnly: Bool = false
+    ) -> [Symbol] {
+        let symbols = Array(self.symbols)
+        var bestOffset: Int?
+        var bestSymbols: [Symbol] = []
 
-    public func closestSymbols(at offset: Int, inSection sectionNumber: Int = 0) -> [Symbol] {
-        closestSymbols(at: offset, inSection: sectionNumber, isGlobalOnly: false)
-    }
+        func updateBestSymbols(_ symbol: Symbol) {
+            if let _bestOffset = bestOffset {
+                if _bestOffset > symbol.offset {
+                    return
+                } else if _bestOffset == symbol.offset {
+                    bestSymbols.append(symbol)
+                } else {
+                    bestOffset = symbol.offset
+                    bestSymbols = [symbol]
+                }
+            } else {
+                bestOffset = symbol.offset
+                bestSymbols = [symbol]
+            }
+        }
 
-    public func closestSymbols(at offset: Int, isGlobalOnly: Bool) -> [Symbol] {
-        closestSymbols(at: offset, inSection: 0, isGlobalOnly: isGlobalOnly)
+        if let dysym = loadCommands.dysymtab {
+            // find closest match in globals
+            let globalStart = UInt64(dysym.iextdefsym)
+            let globalCount = UInt64(dysym.nextdefsym)
+            for i in symbols.indices where (globalStart ..< globalStart + globalCount).contains(UInt64(i)) {
+                let symbol = symbols[i]
+                let nlist = symbol.nlist
+                let symbolSectionNumber = symbol.nlist.sectionNumber
+
+                guard nlist.flags?.type == .sect,
+                      symbol.offset <= offset,
+                      sectionNumber == 0 || symbolSectionNumber == sectionNumber else {
+                    continue
+                }
+                updateBestSymbols(symbol)
+            }
+            if isGlobalOnly { return bestSymbols }
+
+            // find closest match in locals
+            let localStart = UInt64(dysym.ilocalsym)
+            let localCount = UInt64(dysym.nlocalsym)
+            for i in symbols.indices where (localStart ..< localStart + localCount).contains(UInt64(i)) {
+                let symbol = symbols[i]
+                let nlist = symbol.nlist
+                let symbolSectionNumber = symbol.nlist.sectionNumber
+
+                guard nlist.flags?.type == .sect,
+                      nlist.flags?.stab == nil,
+                      symbol.offset <= offset,
+                      sectionNumber == 0 || symbolSectionNumber == sectionNumber else {
+                    continue
+                }
+                updateBestSymbols(symbol)
+            }
+        } else {
+            // find closest match in locals
+            for symbol in symbols {
+                let nlist = symbol.nlist
+                let symbolSectionNumber = symbol.nlist.sectionNumber
+                guard nlist.flags?.type == .sect,
+                      nlist.flags?.stab == nil,
+                      symbol.offset <= offset,
+                      !isGlobalOnly || nlist.flags?.contains(.ext) ?? false,
+                      sectionNumber == 0 || symbolSectionNumber == sectionNumber else {
+                    continue
+                }
+                updateBestSymbols(symbol)
+            }
+        }
+
+        return bestSymbols
     }
 }
 

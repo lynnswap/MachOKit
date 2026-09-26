@@ -698,7 +698,10 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
             XCTAssertEqual(machO.closestSymbols(at: 0x1_0000_0200, isGlobalOnly: true).map(\.name), ["global"])
             XCTAssertTrue(machO.closestSymbols(at: 0x1_0000_0200, inSection: 2).isEmpty)
         }
-        try withMachOFile(data: data, check)
+        try withMachOFile(data: data) { file in
+            check(file)
+            check(ForwardingMachO(base: file))
+        }
     }
 
     func testPointerIndexRejectsDuplicateFileOffsetsAtInsertionOwner() {
@@ -1066,4 +1069,70 @@ private extension Data {
             replaceSubrange(offset ..< offset + bytes.count, with: bytes)
         }
     }
+}
+
+private struct ForwardingMachO: MachORepresentable {
+    let base: MachOFile
+    typealias LoadCommands = MachOFile.LoadCommands
+    typealias Symbol = MachOFile.Symbol
+    typealias Symbols64 = MachOFile.Symbols64
+    typealias Symbols = MachOFile.Symbols
+    typealias IndirectSymbols = MachOFile.IndirectSymbols
+    typealias CFStrings32 = MachOFile.CFStrings32
+    typealias CFStrings64 = MachOFile.CFStrings64
+    typealias RebaseOperations = MachOFile.RebaseOperations
+    typealias BindOperations = MachOFile.BindOperations
+    typealias ExportTrie = MachOFile.ExportTrie
+    typealias Strings = MachOFile.Strings
+    typealias UTF16Strings = MachOFile.UTF16Strings
+    typealias FunctionStarts = MachOFile.FunctionStarts
+    typealias DataInCode = MachOFile.DataInCode
+    typealias DyldChainedFixups = MachOFile.DyldChainedFixups
+    typealias ExternalRelocations = MachOFile.ExternalRelocations
+    typealias CodeSign = MachOFile.CodeSign
+    var is64Bit: Bool { base.is64Bit }
+    var headerSize: Int { base.headerSize }
+    var header: MachHeader { base.header }
+    var loadCommands: LoadCommands { base.loadCommands }
+    var endian: Endian { base.endian }
+    var rpaths: [String] { base.rpaths }
+    var dependencies: [DependedDylib] { base.dependencies }
+    var segments: [any SegmentCommandProtocol] { base.segments }
+    var segments64: AnySequence<SegmentCommand64> { base.segments64 }
+    var segments32: AnySequence<SegmentCommand> { base.segments32 }
+    var preferredLoadAddress: UInt64? { base.preferredLoadAddress }
+    var sections: [any SectionProtocol] { base.sections }
+    var sections64: [Section64] { base.sections64 }
+    var sections32: [Section] { base.sections32 }
+    var symbols: AnyRandomAccessCollection<Symbol> { base.symbols }
+    var symbols64: Symbols64? { base.symbols64 }
+    var symbols32: Symbols? { base.symbols32 }
+    var indirectSymbols: IndirectSymbols? { base.indirectSymbols }
+    var symbolStrings: Strings? { base.symbolStrings }
+    var cStrings: Strings? { base.cStrings }
+    var allCStringTables: [Strings] { base.allCStringTables }
+    var allCStrings: [String] { base.allCStrings }
+    var uStrings: UTF16Strings? { base.uStrings }
+    var cfStrings: [any CFStringProtocol]? { base.cfStrings }
+    var cfStrings64: CFStrings64? { base.cfStrings64 }
+    var cfStrings32: CFStrings32? { base.cfStrings32 }
+    var embeddedInfoPlist: [String: Any]? { base.embeddedInfoPlist }
+    var rebaseOperations: RebaseOperations? { base.rebaseOperations }
+    var bindOperations: BindOperations? { base.bindOperations }
+    var weakBindOperations: BindOperations? { base.weakBindOperations }
+    var lazyBindOperations: BindOperations? { base.lazyBindOperations }
+    var exportTrie: ExportTrie? { base.exportTrie }
+    var exportedSymbols: [ExportedSymbol] { base.exportedSymbols }
+    var bindingSymbols: [BindingSymbol] { base.bindingSymbols }
+    var weakBindingSymbols: [BindingSymbol] { base.weakBindingSymbols }
+    var lazyBindingSymbols: [BindingSymbol] { base.lazyBindingSymbols }
+    var rebases: [Rebase] { base.rebases }
+    var functionStarts: FunctionStarts? { base.functionStarts }
+    var dataInCode: DataInCode? { base.dataInCode }
+    var dyldChainedFixups: DyldChainedFixups? { base.dyldChainedFixups }
+    var externalRelocations: ExternalRelocations? { base.externalRelocations }
+    var classicBindingSymbols: [ClassicBindingSymbol]? { base.classicBindingSymbols }
+    var classicLazyBindingSymbols: [ClassicBindingSymbol]? { base.classicLazyBindingSymbols }
+    var codeSign: CodeSign? { base.codeSign }
+    var expectedMachOFileSize: Int? { base.expectedMachOFileSize }
 }
