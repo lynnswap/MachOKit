@@ -563,6 +563,25 @@ final class DyldChainedFixupsSafetyTests: XCTestCase {
         }
     }
 
+    func testCachedRebaseExcludesChainLinkBits() throws {
+        let blob = makeFixupsBlob(
+            segmentOffsets: [0, 0x10, 0],
+            segmentRelativeOffset: 0x10,
+            entries: [0]
+        )
+        var data = makeMachO(fixupsBlob: blob)
+        data.write(UInt64(0x0020_0000_0007_6758), at: 0x1000)
+        data.write(UInt64(0x0000_0000_0007_6780), at: 0x1010)
+        try withMachOFile(data: data) { machO in
+            try machO.validateChainedFixups()
+            XCTAssertEqual(machO.resolveRebase(at: 0x1000), 0x76758)
+            XCTAssertEqual(machO.resolveOptionalRebase(at: 0x1000), 0x76758)
+            XCTAssertEqual(machO.resolveOptionalRebase(at: 0x1010), 0x76780)
+            machO.invalidateChainedFixupsCache()
+            XCTAssertEqual(machO.resolveOptionalRebase(at: 0x1000), 0x76758)
+        }
+    }
+
     func testPointerIndexRejectsDuplicateFileOffsetsAtInsertionOwner() {
         let pointer = DyldChainedFixupPointer(
             offset: 0x1000,

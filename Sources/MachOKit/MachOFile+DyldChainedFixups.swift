@@ -703,50 +703,13 @@ extension MachOFile.DyldChainedFixups {
         rawValue: UInt64,
         pointerFormat: DyldChainedFixupPointerFormat
     ) -> DyldChainedFixupPointerInfo? {
-        var fixupInfo: DyldChainedFixupPointerInfo?
-        switch pointerFormat {
-        case .arm64e, .arm64e_kernel, .arm64e_userland, .arm64e_firmware:
-            let content = DyldChainedFixupPointerInfo.ARM64E(rawValue: rawValue)
-            switch pointerFormat {
-            case .arm64e: fixupInfo = .arm64e(content)
-            case .arm64e_kernel: fixupInfo = .arm64e_kernel(content)
-            case .arm64e_userland: fixupInfo = .arm64e_userland(content)
-            case .arm64e_firmware: fixupInfo = .arm64e_firmware(content)
-            default: break
-            }
-        case .arm64e_userland24:
-            fixupInfo = .arm64e_userland24(.init(rawValue: rawValue))
-        case ._64, ._64_offset:
-            let content = DyldChainedFixupPointerInfo.General64(rawValue: rawValue)
-            fixupInfo = pointerFormat == ._64 ? ._64(content) : ._64_offset(content)
-        case ._64_kernel_cache, .x86_64_kernel_cache:
-            let content = DyldChainedFixupPointerInfo.General64Cache(rawValue: rawValue)
-            fixupInfo = pointerFormat == ._64_kernel_cache
-                ? ._64_kernel_cache(content)
-                : .x86_64_kernel_cache(content)
-        case .arm64e_shared_cache:
-            fixupInfo = .arm64e_shared_cache(.init(rawValue: rawValue))
-        case .arm64e_segmented:
-            fixupInfo = .arm64e_segmented(.init(rawValue: rawValue))
-        default:
-            break
-        }
-        return fixupInfo
+        .init(rawValue: rawValue, pointerFormat: pointerFormat)
     }
 
     private func _fixupInfo(
         rawValue: UInt32,
         pointerFormat: DyldChainedFixupPointerFormat
     ) -> DyldChainedFixupPointerInfo? {
-        switch pointerFormat {
-        case ._32:
-            ._32(.init(rawValue: rawValue))
-        case ._32_cache:
-            ._32_cache(.init(rawValue: rawValue))
-        case ._32_firmware:
-            ._32_firmware(.init(rawValue: rawValue))
-        default:
-            nil
-        }
+        .init(rawValue: rawValue, pointerFormat: pointerFormat)
     }
 }
