@@ -53,7 +53,16 @@ extension CPU {
 #if canImport(Darwin)
 extension CPU {
     internal static var _currentTypeRawValue: cpu_type_t? {
-        _sysctlValue("hw.cputype")
+        guard let type: cpu_type_t = _sysctlValue("hw.cputype") else {
+            return nil
+        }
+        // Intel macOS reports CPU_TYPE_X86 even on 64-bit hosts.
+        if type == CPU_TYPE_X86,
+           let capable: Int32 = _sysctlValue("hw.cpu64bit_capable"),
+           capable == 1 {
+            return type | CPU_ARCH_ABI64
+        }
+        return type
     }
 
     /// CPU type and subtype of host pc
