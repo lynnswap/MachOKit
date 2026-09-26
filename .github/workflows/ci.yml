@@ -17,18 +17,18 @@ permissions:
   contents: read
 
 env:
-  DEVELOPER_DIR: /Applications/Xcode_16.2.app
+  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
 
 jobs:
   build:
     name: Build & Test
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Select Xcode 16
-        run: sudo xcode-select -s /Applications/Xcode_16.2.app
+      - name: Select Xcode 26.6
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
 
       - name: Build
         run: swift build
@@ -36,13 +36,9 @@ jobs:
   linux-build:
     name: Linux Test
     runs-on: ubuntu-22.04
+    container: swift:6.3.3-jammy@sha256:0c9411e2f70154a16f3e5660299d618a3642a445b446efe2aa637a4d01a83d54
     steps:
-      - name: Install Swift
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: '6.0.3'
-
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Build
         run: swift build

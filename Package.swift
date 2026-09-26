@@ -1,4 +1,4 @@
-// swift-tools-version: 5.10
+// swift-tools-version: 6.3
 
 import PackageDescription
 
@@ -86,7 +86,8 @@ let package = Package(
             name: "MachOKitTests",
             dependencies: ["MachOKit", "MachOArchiveKit", "MachOKitReadable"]
         )
-    ]
+    ],
+    swiftLanguageModes: [.v5]
 )
 
 let machOKit = package.targets.first(where: { $0.name == "MachOKit" })
